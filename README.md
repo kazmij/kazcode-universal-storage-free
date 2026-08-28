@@ -224,9 +224,10 @@ composer build:release  # produces dist/*.zip (PHP-Scoper isolated; requires PHP
 No local PHP/Composer? If you're working inside KAZCODE's private combined-monorepo
 checkout (which also has a Pro add-on directory alongside this one — not present in the
 public source repo above), its repo-root `Makefile` (`make test-all`, `make build`) runs
-everything inside the `apps/` docker QA rig instead. See
-[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) (that doc, and the Makefile, are internal —
-not part of this public repository).
+everything inside the `apps/` docker QA rig instead, documented in that monorepo's own
+`docs/DEVELOPMENT.md`. Neither the Makefile nor that doc are part of this public
+repository — if you're reading this on GitHub at kazmij/kazcode-universal-storage-free,
+use the plain `composer`/`vendor/bin/phpunit` commands above instead.
 
 Manual QA scenarios: [`tests/MANUAL-SCENARIOS.md`](tests/MANUAL-SCENARIOS.md). Locked/expected behaviors with pointers to the guarding test: [`tests/CHARACTERIZATION.md`](tests/CHARACTERIZATION.md).
 

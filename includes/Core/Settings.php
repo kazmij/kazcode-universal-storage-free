@@ -73,6 +73,7 @@ class Settings {
 			'compat_elementor'          => true,
 			'compat_acf'                => true,
 			'compat_gutenberg'          => true,
+			'delete_data_on_uninstall'  => false,
 		);
 	}
 
@@ -255,8 +256,23 @@ class Settings {
 		$out['compat_elementor'] = $bool( 'compat_elementor', $data, $current, $full, true );
 		$out['compat_acf']       = $bool( 'compat_acf', $data, $current, $full, true );
 		$out['compat_gutenberg'] = $bool( 'compat_gutenberg', $data, $current, $full, true );
+		// Default OFF, deliberately: uninstall must never remove recovery-critical
+		// data (storage profiles, credentials, object inventory) unless the site
+		// owner explicitly opts in. See uninstall.php.
+		$out['delete_data_on_uninstall'] = $bool( 'delete_data_on_uninstall', $data, $current, $full, false );
 
 		return $out;
+	}
+
+	/**
+	 * Whether uninstalling this plugin should purge plugin-owned local
+	 * database data (storage profiles, object inventory, credentials, audit
+	 * log, custom tables) in addition to the always-removed disposable state
+	 * (transients, locks, queue/cursor state). Never affects remote storage —
+	 * see uninstall.php, which never deletes S3/R2 objects in either mode.
+	 */
+	public function delete_data_on_uninstall(): bool {
+		return (bool) $this->get( 'delete_data_on_uninstall', false );
 	}
 
 	/**

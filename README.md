@@ -194,7 +194,7 @@ DigitalOcean Spaces, MinIO, Wasabi, and Backblaze B2 all work via the same **End
 - Secret access keys are encrypted at rest (libsodium `sodium_crypto_secretbox`, with an AES-256-GCM fallback), keyed off your WordPress salts (`AUTH_KEY`, `SECURE_AUTH_KEY`, `AUTH_SALT`, `SECURE_AUTH_SALT`) — never stored in plaintext, never written to logs, never returned by the REST API or admin HTML once saved (the secret field stays blank on later edits; leaving it blank keeps the existing value).
 - Remote delete is always an explicit, chunked key list — never a recursive prefix wipe.
 - Local file deletion only happens after `realpath` confirms the file is under the uploads directory, and only after a successful remote HEAD verification.
-- Uninstalling the plugin removes only its own options and postmeta — it never touches your bucket.
+- Uninstalling never touches your bucket, WordPress attachments, or local media files. By default it only clears disposable runtime state (locks, caches, queued job state) and preserves storage profiles/credentials/inventory for recovery on reinstall; an opt-in "Delete Universal Storage data when uninstalling" setting (Settings, off by default) additionally purges that local plugin data — still never remote objects or media.
 
 **Reporting a vulnerability:** email kazmij@gmail.com directly rather than opening a public issue.
 

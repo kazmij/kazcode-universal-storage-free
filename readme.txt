@@ -49,6 +49,10 @@ Free (this plugin) is a complete, non-trial product: automatic offload, migrate,
 
 Only the storage endpoint you configure yourself — Amazon S3, Cloudflare R2, DigitalOcean Spaces, Wasabi, Backblaze B2, MinIO, or another S3-compatible service — using the credentials and bucket you provide under Universal Storage → Storage. KAZCODE Universal Storage does not send your media files, credentials, or site data to any KAZCODE-owned server; there is no telemetry, tracking, or phone-home in this plugin.
 
+= Does uninstalling delete my bucket files? =
+
+No. Uninstalling never deletes remote storage objects, never contacts your storage provider, and never deletes WordPress attachments or local media files. By default it only removes disposable runtime state (locks, caches, queued job state) and preserves your storage profiles, credentials, and object inventory so a reinstall can recover them. An explicit "Delete Universal Storage data when uninstalling" setting (off by default) additionally removes that local plugin data — still never remote objects or media — if you want a full local cleanup.
+
 = Where can I find documentation? =
 
 Full documentation — installation, storage-provider setup, migration, restore, health, WP-CLI, troubleshooting, and Pro — is at https://kazcode.net/universal-storage/docs/.

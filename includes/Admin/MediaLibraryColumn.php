@@ -155,10 +155,12 @@ final class MediaLibraryColumn {
 	 * Admin notice after bulk.
 	 */
 	public function bulk_notice(): void {
-		if ( ! isset( $_GET['s3ms_bulk'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: this is a query-arg round-trip WordPress core's own bulk-actions redirect adds (add_query_arg() in handle_bulk() above), not a form submission; it only controls whether an informational notice is shown, never a state change.
+		if ( ! isset( $_GET['s3ms_bulk'] ) ) {
 			return;
 		}
-		$n = (int) $_GET['s3ms_bulk']; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only, see rationale above; cast to int and only ever used as a display count in the notice text below.
+		$n = (int) $_GET['s3ms_bulk'];
 		printf(
 			'<div class="notice notice-success is-dismissible"><p>%s</p></div>',
 			esc_html(

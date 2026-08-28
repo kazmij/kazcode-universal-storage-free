@@ -151,6 +151,17 @@ Production / committed `vendor/` may be `--no-dev` (AWS SDK only). Always `compo
 | Acceptance smoke | §36 infra checks (partial, retry, repair, queue, IA) | `test-v2-acceptance.php` |
 | Superseded variants don't flip status to failed (fixed bug) | `AttachmentSyncDeriver::derive_status()` excludes `stale`/`deleted` object rows from the present/total roll-up, so a fully-offloaded attachment stays `offloaded` after Image Editor crop, Regenerate Thumbnails, or a storage-profile migration leaves the old variant row behind as `stale` — previously it incorrectly derived as `failed`, which broke `AttachmentUrlFilter` URL rewriting for that attachment (Scenario F) | `AttachmentSyncDeriverTest::test_stale_variant_is_excluded_from_roll_up` et al. |
 
+## Uninstall (`uninstall.php`)
+
+Not PHPUnit-testable (needs a real DB + `WP_UNINSTALL_PLUGIN` context) — verified manually against a real WordPress install each time this file changes. Never touches remote storage, WordPress attachment posts, or local media files, in either mode below.
+
+| Behavior | Expected | Verification |
+|----------|----------|------|
+| Default (`delete_data_on_uninstall` off) | Removes only disposable state: transients, `s3ms_lock_*` per-attachment locks, queue/batch cursor options, dashboard stats cache, `kazus_background_tick` cron, Action Scheduler's `kazus_queue_job` actions, tour-dismissal user meta. Preserves `s3ms_settings`, `s3ms_encrypted_secret`, `s3ms_profile_credentials`, `s3ms_schema_version`, `s3ms_legacy_profile_uuid`, `s3ms_audit_log`, both custom tables (with their rows), and every `_s3ms_*` attachment postmeta | Manual: configured full install, uninstalled, confirmed all of the above survived/cleared exactly as listed |
+| Purge (`delete_data_on_uninstall` on) | Everything above, plus: all listed durable options, `DROP TABLE IF EXISTS` on both `s3ms_storage_profiles`/`s3ms_objects`, and every `_s3ms_*` postmeta removed. WordPress attachment post itself untouched | Manual: same setup with the setting enabled, uninstalled, confirmed every durable item gone and the attachment post still present |
+| Idempotence | Second uninstall against an already-clean DB does not fatal | Manual: install → uninstall → reinstall → uninstall again, twice; `wp-content/debug.log` stayed empty both times |
+| Multisite | Network-activated installs get per-site cleanup via `get_sites()` + `switch_to_blog()` (this plugin's tables/options are per-site, not created once network-wide); `s3ms_network_settings` uses `delete_site_option()` | Code review only — not exercised against a real multisite network this pass |
+
 ## PHP
 
 Requires **PHP 8.3+** (WordPress.org recommended baseline). Local APTA Docker: PHP 8.4.

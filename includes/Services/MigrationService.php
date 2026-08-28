@@ -22,6 +22,15 @@ final class MigrationService {
 
 	public const STATUS_FILTER_RETRY = 'retry';
 
+	/**
+	 * Dashboard stats are read-heavy (loaded on every admin page in this
+	 * plugin's menu) and tolerate a little staleness — unlike query_ids()/
+	 * verify_batch()/restore_batch() below, nothing depends on stats() being
+	 * exactly live, so a short transient is the correct, safe cache here.
+	 */
+	private const STATS_CACHE_KEY = 'kazus_migration_stats_cache';
+	private const STATS_CACHE_TTL = 30;
+
 	private Settings $settings;
 	private AttachmentOffloader $offloader;
 	private VerificationService $verification;
@@ -38,12 +47,17 @@ final class MigrationService {
 	 * @return array{total:int,offloaded:int,pending:int,failed:int,verified:int,uploading:int}
 	 */
 	public function stats(): array {
+		$cached = get_transient( self::STATS_CACHE_KEY );
+		if ( is_array( $cached ) ) {
+			return $cached;
+		}
+
 		$total     = $this->count_attachments();
 		$offloaded = $this->count_by_status(AttachmentOffloader::STATUS_OFFLOADED);
 		$failed    = $this->count_by_status(AttachmentOffloader::STATUS_FAILED);
 		$uploading = $this->count_by_status(AttachmentOffloader::STATUS_UPLOADING);
 
-		return array(
+		$stats = array(
 			'total'     => $total,
 			'offloaded' => $offloaded,
 			'pending'   => max(0, $total - $offloaded - $failed - $uploading),
@@ -51,6 +65,10 @@ final class MigrationService {
 			'verified'  => $this->count_with_meta('_s3ms_verified_at'),
 			'uploading' => $uploading,
 		);
+
+		set_transient( self::STATS_CACHE_KEY, $stats, self::STATS_CACHE_TTL );
+
+		return $stats;
 	}
 
 	/**
@@ -72,6 +90,7 @@ final class MigrationService {
 	 * Count attachments with a given _s3ms_status.
 	 */
 	private function count_by_status(string $status): int {
+		// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- only called from stats(), which caches its result in a 30s transient; no s3ms_objects-table equivalent for the legacy per-attachment _s3ms_status this dashboard stat reports.
 		$q = new \WP_Query(
 			array(
 				'post_type'      => 'attachment',
@@ -89,6 +108,7 @@ final class MigrationService {
 	 * Count attachments that have a meta key set.
 	 */
 	private function count_with_meta(string $key): int {
+		// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- only called from stats(), which caches its result in a 30s transient.
 		$q = new \WP_Query(
 			array(
 				'post_type'      => 'attachment',
@@ -150,6 +170,7 @@ final class MigrationService {
 		}
 
 		if ( $status_filter === self::STATUS_FILTER_RETRY ) {
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- cursor-based batch migration query; each batch's results must reflect attachments the previous batch just changed, so caching here would be actively incorrect, not just wasteful.
 			$args['meta_query'] = array(
 				array(
 					'key'     => '_s3ms_status',
@@ -161,10 +182,13 @@ final class MigrationService {
 				),
 			);
 		} elseif ( $status_filter === AttachmentOffloader::STATUS_FAILED ) {
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- cursor-based batch migration query; must not be cached, see rationale above.
 			$args['meta_key']   = '_s3ms_status';
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- cursor-based batch migration query; must not be cached, see rationale above.
 			$args['meta_value'] = AttachmentOffloader::STATUS_FAILED;
 		} else {
 			// Pending / never touched: no status, pending, or uploading (recover). Exclude failed + offloaded.
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- cursor-based batch migration query; must not be cached, see rationale above.
 			$args['meta_query'] = array(
 				'relation' => 'OR',
 				array(
@@ -259,6 +283,7 @@ final class MigrationService {
 		if ($attachment_id) {
 			$ids = array($attachment_id);
 		} else {
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- cursor-based batch verify query; each batch must reflect attachments the previous batch just verified, so caching would be actively incorrect.
 			$args = array(
 				'post_type'      => 'attachment',
 				'post_status'    => 'inherit',
@@ -313,6 +338,7 @@ final class MigrationService {
 		if ($attachment_id !== null && $attachment_id > 0) {
 			$ids = array($attachment_id);
 		} else {
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- cursor-based batch restore query; each batch must reflect attachments the previous batch just restored, so caching would be actively incorrect.
 			$args = array(
 				'post_type'      => 'attachment',
 				'post_status'    => 'inherit',

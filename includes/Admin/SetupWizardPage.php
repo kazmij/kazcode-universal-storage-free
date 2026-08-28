@@ -59,7 +59,8 @@ final class SetupWizardPage {
 		if ( ! current_user_can( 'manage_options' ) || ! $this->settings->needs_wizard() ) {
 			return;
 		}
-		if ( isset( $_GET['activate-multi'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: only decides whether to skip the automatic post-activation wizard redirect, never a state change.
+		if ( isset( $_GET['activate-multi'] ) ) {
 			return;
 		}
 
@@ -76,9 +77,11 @@ final class SetupWizardPage {
 		}
 		check_admin_referer( 'kazus_wizard' );
 
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- check_admin_referer( 'kazus_wizard' ) above already verifies the nonce for this entire handler.
 		$step = isset( $_POST['step'] ) ? (int) $_POST['step'] : 1;
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- nonce: see check_admin_referer() above. Sanitization: the raw unslashed array is passed through Settings::sanitize() three lines below before it's ever stored or used.
 		$data = isset( $_POST[ Settings::OPTION_KEY ] ) && is_array( $_POST[ Settings::OPTION_KEY ] )
-			? wp_unslash( $_POST[ Settings::OPTION_KEY ] ) // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+			? wp_unslash( $_POST[ Settings::OPTION_KEY ] )
 			: array();
 
 		$current = $this->settings->all();
@@ -86,8 +89,10 @@ final class SetupWizardPage {
 		update_option( Settings::OPTION_KEY, $clean, false );
 		$this->settings->flush_cache();
 
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- see check_admin_referer() above.
 		if ( isset( $_POST['s3ms_secret_access_key'] ) ) {
-			$secret = (string) wp_unslash( $_POST['s3ms_secret_access_key'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+			// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- this is a credential (AWS-style secret key), not display/markup content; sanitize_text_field() could silently corrupt valid characters. Type-cast to string and immediately encrypted at rest by set_secret_access_key() below, never echoed or used in a query.
+			$secret = (string) wp_unslash( $_POST['s3ms_secret_access_key'] );
 			if ( $secret !== '' ) {
 				$this->settings->set_secret_access_key( $secret );
 			}
@@ -95,6 +100,7 @@ final class SetupWizardPage {
 
 		( new AuditLog() )->record( 'wizard_step', array( 'step' => $step ) );
 
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- see check_admin_referer() above.
 		if ( ! empty( $_POST['finish'] ) ) {
 			$this->settings->complete_wizard();
 			wp_safe_redirect( admin_url( 'admin.php?page=' . AdminMenu::MENU_SLUG ) );
@@ -113,7 +119,8 @@ final class SetupWizardPage {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
-		$step = isset( $_GET['step'] ) ? max( 1, min( 4, (int) $_GET['step'] ) ) : 1; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: only selects which wizard step to render, never a state change (saving a step goes through save(), which verifies check_admin_referer( 'kazus_wizard' )).
+		$step = isset( $_GET['step'] ) ? max( 1, min( 4, (int) $_GET['step'] ) ) : 1;
 		$s    = $this->settings->all();
 		$opt  = Settings::OPTION_KEY;
 		$presets = ProviderPresets::all();

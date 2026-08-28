@@ -21,10 +21,12 @@ final class AdminLegacyRedirects {
 	}
 
 	public function maybe_redirect(): void {
-		if ( ! is_admin() || ! isset( $_GET['page'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: decides a redirect target, never a state change, so there is nothing for a nonce to protect.
+		if ( ! is_admin() || ! isset( $_GET['page'] ) ) {
 			return;
 		}
-		$page = sanitize_key( (string) wp_unslash( $_GET['page'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only, see rationale above; value is only used as a lookup key into the fixed $map below (sanitize_key() + isset() against a hardcoded allowlist), never persisted or used in a query.
+		$page = sanitize_key( (string) wp_unslash( $_GET['page'] ) );
 		// Keys are the original v1.x slugs (predate both rebrands) — never
 		// rename these, they represent real historical bookmarks.
 		$map  = array(

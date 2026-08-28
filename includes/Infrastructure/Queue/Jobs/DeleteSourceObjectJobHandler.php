@@ -51,16 +51,12 @@ final class DeleteSourceObjectJobHandler implements JobHandlerInterface {
 		$gateway->delete_key( $key );
 
 		global $wpdb;
+		// $table is a fixed literal ('s3ms_objects') prefixed with $wpdb->prefix —
+		// never user-controlled — and every value below is bound via
+		// $wpdb->prepare()'s %s/%d placeholders.
 		$table = $wpdb->prefix . 's3ms_objects';
-		$wpdb->query(
-			$wpdb->prepare(
-				"UPDATE {$table} SET remote_status = %s, updated_at = %s WHERE storage_profile_id = %d AND object_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL
-				ObjectRemoteStatus::DELETED,
-				gmdate( 'Y-m-d H:i:s' ),
-				$profile_id,
-				$key
-			)
-		);
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- plugin-owned table (fixed name, not user input); values bound via prepare().
+		$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET remote_status = %s, updated_at = %s WHERE storage_profile_id = %d AND object_key = %s", ObjectRemoteStatus::DELETED, gmdate( 'Y-m-d H:i:s' ), $profile_id, $key ) );
 
 		return array(
 			'success' => true,

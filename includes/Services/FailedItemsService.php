@@ -32,6 +32,7 @@ final class FailedItemsService {
 		$page     = max( 1, $page );
 		$per_page = max( 1, min( 100, $per_page ) );
 
+		// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- admin-only Media/Migration "failed items" dashboard, bounded by posts_per_page (max 100, clamped above); no s3ms_objects-table equivalent exists for the ignored/missing_local filters below, which read the legacy _s3ms_ignored postmeta this page is documented to still support.
 		$args = array(
 			'post_type'      => 'attachment',
 			'post_status'    => 'inherit',

@@ -69,6 +69,40 @@ final class SettingsTest extends TestCase {
 		$this->assertTrue( $clean['private_media'] );
 	}
 
+	public function test_delete_data_on_uninstall_defaults_to_false(): void {
+		$this->assertFalse( Settings::defaults()['delete_data_on_uninstall'] );
+	}
+
+	public function test_delete_data_on_uninstall_can_be_enabled_explicitly(): void {
+		$settings = new Settings();
+		$clean    = $settings->sanitize(
+			array(
+				'_s3ms_full_form'          => '1',
+				'delete_data_on_uninstall' => '1',
+			),
+			Settings::defaults()
+		);
+		$this->assertTrue( $clean['delete_data_on_uninstall'] );
+	}
+
+	public function test_delete_data_on_uninstall_stays_off_on_unrelated_full_form_save(): void {
+		// A full-form save that doesn't check the box must turn it back off —
+		// same unchecked-checkbox semantics as every other boolean setting.
+		$settings = new Settings();
+		$current  = array_merge( Settings::defaults(), array( 'delete_data_on_uninstall' => true ) );
+		$clean    = $settings->sanitize(
+			array( '_s3ms_full_form' => '1' ),
+			$current
+		);
+		$this->assertFalse( $clean['delete_data_on_uninstall'] );
+	}
+
+	public function test_delete_data_on_uninstall_getter_reads_stored_value(): void {
+		update_option( Settings::OPTION_KEY, array_merge( Settings::defaults(), array( 'delete_data_on_uninstall' => true ) ) );
+		$settings = new Settings();
+		$this->assertTrue( $settings->delete_data_on_uninstall() );
+	}
+
 	public function test_private_media_can_be_disabled_on_free(): void {
 		$settings = new Settings();
 		$current  = array_merge( Settings::defaults(), array( 'private_media' => true ) );

@@ -74,7 +74,7 @@ final class AdoptService {
 		$sql     .= ' ORDER BY p.ID ASC LIMIT %d';
 		$params[] = $limit;
 
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is built entirely from fixed table-name literals ($wpdb->posts, $wpdb->postmeta, $objects_table, all non-user-controlled) and hardcoded SQL keywords; every actual value is bound via the %d/%s placeholders passed to $wpdb->prepare() below. Plugin-owned s3ms_objects table, no core API for this query.
 		$ids = $wpdb->get_col( $wpdb->prepare( $sql, ...$params ) );
 		if ( ! is_array( $ids ) ) {
 			return array();

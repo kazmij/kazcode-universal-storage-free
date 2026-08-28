@@ -153,8 +153,10 @@ final class SettingsPage {
 		$clean   = $this->settings->sanitize( $input, $current );
 
 		// Handle secret separately — empty means keep existing.
-		if ( isset( $_POST['s3ms_secret_access_key'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Missing
-			$secret = (string) wp_unslash( $_POST['s3ms_secret_access_key'] ); // phpcs:ignore WordPress.Security.NonceVerification.Missing,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- sanitize_options() is registered as this option's sanitize_callback (see register_settings() below) and has no other call site in this codebase; WordPress Settings API verifies the options nonce (settings_fields()) before invoking it.
+		if ( isset( $_POST['s3ms_secret_access_key'] ) ) {
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- nonce: see rationale above. Sanitization: this is a credential (AWS-style secret key), not display/markup content; sanitize_text_field() could silently corrupt valid characters. It is type-cast to string and immediately encrypted at rest by set_secret_access_key() below, never echoed or used in a query.
+			$secret = (string) wp_unslash( $_POST['s3ms_secret_access_key'] );
 			if ( $secret !== '' ) {
 				$this->settings->set_secret_access_key( $secret );
 			}
@@ -523,6 +525,27 @@ final class SettingsPage {
 									__( 'Compatibility: Elementor', 'kazcode-universal-storage' ),
 									__( 'Elementor usually stores attachment IDs; URL filters apply. Hard-coded theme asset paths are never rewritten.', 'kazcode-universal-storage' ),
 									! empty( $s['compat_elementor'] )
+								);
+								?>
+							</div>
+						</section>
+
+						<section class="s3ms-card" id="s3ms-section-uninstall">
+							<div class="s3ms-card__head">
+								<span class="s3ms-step">6</span>
+								<div>
+									<h2 class="s3ms-card__title"><?php esc_html_e( 'Uninstall', 'kazcode-universal-storage' ); ?></h2>
+									<p class="s3ms-card__intro"><?php esc_html_e( 'What happens to plugin data if you delete the plugin.', 'kazcode-universal-storage' ); ?></p>
+								</div>
+							</div>
+							<div class="s3ms-card__body">
+								<?php
+								$this->toggle(
+									$opt,
+									'delete_data_on_uninstall',
+									__( 'Delete Universal Storage data when uninstalling', 'kazcode-universal-storage' ),
+									__( 'When disabled (default), storage profiles, media mappings, and other recovery data are preserved if you delete the plugin. When enabled, plugin-owned database data and stored credentials are removed during uninstall. Remote storage objects and WordPress media files are never deleted, either way.', 'kazcode-universal-storage' ),
+									! empty( $s['delete_data_on_uninstall'] )
 								);
 								?>
 							</div>

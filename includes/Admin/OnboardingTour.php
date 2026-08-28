@@ -69,7 +69,8 @@ final class OnboardingTour {
 		}
 		check_ajax_referer( 's3ms_admin', 'nonce' );
 
-		$page = isset( $_POST['page'] ) ? sanitize_key( (string) $_POST['page'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- check_ajax_referer( 's3ms_admin', 'nonce' ) above already verifies the nonce for this whole handler.
+		$page = isset( $_POST['page'] ) ? sanitize_key( (string) $_POST['page'] ) : '';
 		if ( $page === '' ) {
 			wp_send_json_error( array( 'message' => 'Missing page.' ), 400 );
 		}
@@ -86,8 +87,10 @@ final class OnboardingTour {
 	 * slug), or "media-library" for WP core's own Media Library screen.
 	 */
 	private function current_page_slug(): string {
-		if ( isset( $_GET['page'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-			$page = sanitize_key( (string) wp_unslash( $_GET['page'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: only decides which tour/dismissal key applies to the current screen, never a state change.
+		if ( isset( $_GET['page'] ) ) {
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only, see rationale above.
+			$page = sanitize_key( (string) wp_unslash( $_GET['page'] ) );
 			$page = preg_replace( '/^kazcode-universal-storage-?/', '', $page );
 			return $page === '' ? 'dashboard' : $page;
 		}

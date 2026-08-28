@@ -91,14 +91,21 @@ final class LocalFileProvider {
 	 * Before AJAX image editor runs, pull source from S3 if needed.
 	 */
 	public function ensure_before_image_editor(): void {
-		$post_id = isset($_POST['postid']) ? (int) $_POST['postid'] : 0; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- $post_id itself is only used to look up a post; the actual nonce (matching WP core's own wp_ajax_image_editor(), which this hook runs before at priority 1) is verified below prior to any file I/O.
+		$post_id = isset($_POST['postid']) ? (int) $_POST['postid'] : 0;
 		if ($post_id <= 0 || !$this->is_offloaded($post_id)) {
 			return;
 		}
 		if (!current_user_can('edit_post', $post_id)) {
 			return;
 		}
-		// Nonce is validated later by core image editor; we only gate capability here.
+		// This hook runs at priority 1 on the same wp_ajax_image-editor action
+		// core's own wp_ajax_image_editor() handles at the default priority —
+		// core verifies "image_editor-$post_id" there, but only after this
+		// hook has already run. Verify the identical nonce here too, since
+		// this method does real file I/O (downloading from S3) before core
+		// gets a chance to reject an invalid request.
+		check_ajax_referer( "image_editor-{$post_id}" );
 		try {
 			$this->ensure_local($post_id, true);
 		} catch (\Throwable $e) {

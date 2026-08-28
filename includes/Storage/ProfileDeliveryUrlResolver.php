@@ -117,9 +117,11 @@ final class ProfileDeliveryUrlResolver {
 		}
 
 		if ( $region === 'us-east-1' ) {
+			// phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- this is the plugin's core, disclosed purpose: building the delivery URL for the administrator's own configured S3 bucket/region, not loading a remote script/style/library.
 			return 'https://' . $bucket . '.s3.amazonaws.com/' . $path;
 		}
 
+		// phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- same as above; region-specific S3 endpoint form.
 		return 'https://' . $bucket . '.s3.' . $region . '.amazonaws.com/' . $path;
 	}
 

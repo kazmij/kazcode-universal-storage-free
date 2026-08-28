@@ -10,7 +10,6 @@ declare(strict_types=1);
 namespace Kazcode\WpStorage\Tests;
 
 use PHPUnit\Framework\TestCase;
-use Kazcode\WpStorage\Core\Features;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\StorageProfile;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
@@ -24,11 +23,6 @@ final class StorageProfileAdminServiceTest extends TestCase {
 
 	protected function setUp(): void {
 		WpStubs::reset();
-		// Multiple profiles / per-profile credentials are Pro-only; most tests
-		// here exercise CRUD/credential mechanics, not gating — the dedicated
-		// "requires pro" tests below explicitly force lite via
-		// kazus_feature_enabled, which overrides this regardless of plan.
-		add_filter( 'kazus_plan', static fn(): string => Features::PLAN_PRO );
 	}
 
 	protected function tearDown(): void {

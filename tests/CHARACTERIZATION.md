@@ -114,9 +114,9 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 
 | Behavior | Expected | Test |
 |----------|----------|------|
-| Default plan | `Features::plan()` is `lite` (no Pro capabilities) unless `KAZUS_PLAN` is defined as `pro` or a Pro module is registered — a prior default-plan-is-pro bug meant this path was never exercised until the default flipped to lite | `FeaturesProTest::test_default_plan_is_lite_and_blocks_pro_features` |
-| Lite plan | Pro-only keys (`multiple_profiles`, `storage_profile_migration`, `orphan_scan`, `advanced_health`, …) return false without Pro module | `FeaturesProTest::test_lite_plan_blocks_pro_features_without_module` |
-| Pro module | `ModuleRegistry::has_pro_module()` unlocks Pro tier even on lite plan | `FeaturesProTest::test_pro_module_unlocks_features_on_lite_plan` |
+| Default plan | `Features::plan()` is `lite` (no Pro capabilities) unless a Pro module is registered — a prior default-plan-is-pro bug meant this path was never exercised until the default flipped to lite | `FeaturesProTest::test_default_plan_is_lite_and_blocks_pro_features` |
+| No production plan override | There is no constant or filter that can make `is_pro_active()` true without a real Pro module registering via `ModuleRegistry` — a leftover `kazus_plan` filter (the old override, now removed) is inert | `FeaturesProTest::test_kazus_plan_filter_no_longer_has_any_effect` |
+| Pro module | `ModuleRegistry::has_pro_module()` is the sole source of truth for Pro tier | `FeaturesProTest::test_core_with_active_pro_module_is_pro_active` |
 | Service gates | `MigrateObjectService`, `OrphanScanService`, profile `insert` (2nd+ row) reject on lite | `ProFeatureGateTest` |
 | Pro add-on | Separate plugin `kazcode-universal-storage-pro` registers `ProModule` on `plugins_loaded` priority 9 | manual / activation dependency |
 

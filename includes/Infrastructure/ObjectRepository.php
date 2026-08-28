@@ -119,9 +119,14 @@ final class ObjectRepository {
 			return array();
 		}
 		$placeholders = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
-		$sql          = "SELECT * FROM {$this->table()} WHERE attachment_id = %d AND remote_status IN ({$placeholders}) ORDER BY id ASC"; // phpcs:ignore WordPress.DB.PreparedSQL
 		$params       = array_merge( array( $attachment_id ), array_values( $statuses ) );
-		$rows         = $wpdb->get_results( $wpdb->prepare( $sql, ...$params ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$rows         = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->table()} WHERE attachment_id = %d AND remote_status IN ({$placeholders}) ORDER BY id ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				...$params
+			),
+			ARRAY_A
+		);
 		return is_array( $rows ) ? $rows : array();
 	}
 

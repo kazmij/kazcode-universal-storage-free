@@ -131,6 +131,7 @@ final class ProfileStorageGateway {
 			);
 		} catch ( \Throwable $e ) {
 			if ( ! $this->is_missing_object_error( $e ) ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- only reached from queue job handlers / adopt orchestration (background execution, no HTML render); never echoed.
 				throw new \RuntimeException( 'Delete failed for key: ' . $key, 0, $e );
 			}
 		}

@@ -79,48 +79,25 @@ final class FeaturesProTest extends TestCase {
 		$this->assertTrue( Features::enabled( 'multiple_profiles' ) );
 	}
 
-	public function test_lite_plan_blocks_pro_features_without_module(): void {
+	/**
+	 * The old KAZUS_PLAN constant / kazus_plan filter override was removed —
+	 * neither can make a Free install report Pro active any more. A stray
+	 * `kazus_plan` filter left over from an old integration (or deliberately
+	 * added by a self-hosted site) must be inert now: Features no longer
+	 * reads that filter at all.
+	 */
+	public function test_kazus_plan_filter_no_longer_has_any_effect(): void {
 		add_filter(
 			'kazus_plan',
 			static function (): string {
-				return Features::PLAN_LITE;
+				return Features::PLAN_PRO;
 			}
 		);
 
-		$this->assertSame( 'lite', Features::plan() );
 		$this->assertFalse( Features::is_pro_active() );
+		$this->assertSame( 'lite', Features::plan() );
 		$this->assertFalse( Features::enabled( 'multiple_profiles' ) );
 		$this->assertFalse( Features::enabled( 'storage_profile_migration' ) );
-	}
-
-	public function test_pro_module_unlocks_features_on_lite_plan(): void {
-		add_filter(
-			'kazus_plan',
-			static function (): string {
-				return Features::PLAN_LITE;
-			}
-		);
-
-		ModuleRegistry::instance()->register(
-			new class() implements ModuleInterface {
-				public function id(): string {
-					return 'pro-stub';
-				}
-
-				public function name(): string {
-					return 'Pro stub';
-				}
-
-				public function is_pro(): bool {
-					return true;
-				}
-
-				public function boot(): void {
-				}
-			}
-		);
-
-		$this->assertTrue( Features::is_pro_active() );
-		$this->assertTrue( Features::enabled( 'orphan_scan' ) );
+		$this->assertFalse( Features::enabled( 'orphan_scan' ) );
 	}
 }

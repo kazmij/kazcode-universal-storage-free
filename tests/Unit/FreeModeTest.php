@@ -1,7 +1,7 @@
 <?php
 /**
  * Free-alone behavior: the picture a WordPress.org install (core only,
- * no Pro plugin, no KAZUS_PLAN override) must present.
+ * no Pro plugin registered) must present.
  *
  * @package Kazcode\WpStorage
  */

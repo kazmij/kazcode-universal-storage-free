@@ -120,6 +120,7 @@ final class S3Storage {
 			try {
 				$uploader->upload();
 			} catch (MultipartUploadException $e) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by ObjectOffloadService/AttachmentOffloader, redacted/truncated, and the one place it reaches HTML already uses esc_html().
 				throw new \RuntimeException('Multipart upload failed: ' . $e->getMessage(), 0, $e);
 			}
 		} else {
@@ -248,6 +249,7 @@ final class S3Storage {
 			if ($this->is_missing_object_error($e)) {
 				return;
 			}
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- callers (ConnectionTestService, attachment delete/restore flows) catch \Throwable generically and never echo the raw message as HTML.
 			throw new \RuntimeException('Delete failed for key: ' . $key, 0, $e);
 		}
 	}
@@ -276,6 +278,7 @@ final class S3Storage {
 			if ($this->should_fallback_to_single_delete($e)) {
 				return false;
 			}
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- callers catch \Throwable generically and never echo the raw message as HTML; message itself is a static string with no interpolation.
 			throw new \RuntimeException('Batch delete failed.', 0, $e);
 		}
 	}

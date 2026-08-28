@@ -47,6 +47,7 @@ final class ProfileS3ClientFactory {
 				$key    = $store->get_access_key_id( $profile->credentials_ref );
 				$secret = $store->get_secret( $profile->credentials_ref );
 				if ( $key === '' || $secret === '' ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- only reached from queue job handlers / adopt orchestration (background execution, no HTML render); never echoed.
 					throw new \RuntimeException( 'Profile credentials are not configured: ' . $profile->credentials_ref );
 				}
 				$config['credentials'] = array(

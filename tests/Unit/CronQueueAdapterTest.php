@@ -59,9 +59,6 @@ final class CronQueueAdapterTest extends TestCase {
 	}
 
 	public function test_enqueue_bulk_migrate_delegates_to_background_migrator(): void {
-		// Background/queue migration is Pro-only (Features::pro_feature_keys()).
-		add_filter( 'kazus_plan', static fn(): string => \Kazcode\WpStorage\Core\Features::PLAN_PRO );
-
 		$settings = $this->createMock( Settings::class );
 		$settings->method( 'get' )->willReturn( 20 );
 		$migrator = new BackgroundMigrator( $settings, $this->createMock( AuditLog::class ) );

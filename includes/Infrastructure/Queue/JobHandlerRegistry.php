@@ -28,6 +28,7 @@ final class JobHandlerRegistry {
 	 */
 	public function handle( string $job_type, array $payload ): array {
 		if ( ! isset( $this->handlers[ $job_type ] ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- unreachable in practice (every caller checks supports() first); if it ever fires it's a background WP-Cron/Action Scheduler job with no HTML output, never echoed.
 			throw new \RuntimeException( 'No queue handler for job type: ' . $job_type );
 		}
 		return $this->handlers[ $job_type ]->handle( $payload );

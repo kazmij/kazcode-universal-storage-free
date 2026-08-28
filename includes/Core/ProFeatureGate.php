@@ -25,6 +25,7 @@ final class ProFeatureGate {
 		if ( Features::enabled( $feature ) ) {
 			return;
 		}
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by callers and returned only in a WP_CLI::error()/WP_REST_Response JSON payload, never echoed as HTML.
 		throw new \RuntimeException(
 			sprintf(
 				'Feature "%s" requires KAZCODE Universal Storage Pro.',

@@ -106,13 +106,15 @@ if ( ! empty( $full['enabled'] ) || ! empty( $full['serve_from_s3'] ) ) {
 	$mark( 'full_form_sanitize' );
 }
 
-// Default plan is lite on a clean core-only install (no KAZUS_PLAN, no Pro
-// module) — this eval-file runs against core alone, so Pro-tier features must
-// be off by default, not on.
+// Default plan is lite on a clean core-only install (no Pro module
+// registered) — this eval-file runs against core alone, so Pro-tier features
+// must be off by default, not on. background_migrate/private_media/audit_log
+// are deliberately NOT in this list — they're Free capabilities now, on by
+// default regardless of plan (see Features::pro_feature_keys()).
 if ( Kazcode\WpStorage\Core\Features::plan() !== 'lite' ) {
 	$fail( 'plan not lite (expected default on core-only install): ' . Kazcode\WpStorage\Core\Features::plan() );
 }
-foreach ( array( 'background_migrate', 'private_media', 'audit_log', 'multisite_network', 'multiple_profiles', 'storage_profile_migration', 'orphan_scan', 'advanced_health' ) as $f ) {
+foreach ( array( 'multisite_network', 'multiple_profiles', 'storage_profile_migration', 'orphan_scan', 'advanced_health' ) as $f ) {
 	if ( Kazcode\WpStorage\Core\Features::enabled( $f ) ) {
 		$fail( "feature unexpectedly on for lite default: {$f}" );
 	}

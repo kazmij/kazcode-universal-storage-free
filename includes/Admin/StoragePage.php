@@ -241,7 +241,13 @@ final class StoragePage {
 						<div class="s3ms-fields">
 							<div class="s3ms-field">
 								<label class="s3ms-field__label" for="s3ms_public_base_url"><?php esc_html_e( 'S3 public / base URL', 'kazcode-universal-storage' ); ?></label>
-								<input class="s3ms-field__input large-text" type="url" id="s3ms_public_base_url" name="<?php echo esc_attr( $opt ); ?>[public_base_url]" value="<?php echo esc_attr( (string) ( $s['public_base_url'] ?? '' ) ); ?>" placeholder="https://my-bucket.s3.amazonaws.com" />
+								<?php
+								// phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- placeholder/example text in the admin input field, never fetched as a resource.
+								echo '<input class="s3ms-field__input large-text" type="url" id="s3ms_public_base_url" name="'
+									. esc_attr( $opt ) . '[public_base_url]" value="'
+									. esc_attr( (string) ( $s['public_base_url'] ?? '' ) ) . '" placeholder="'
+									. esc_attr( 'https://my-bucket.s3.amazonaws.com' ) . '" />';
+								?>
 							</div>
 							<div class="s3ms-field">
 								<label class="s3ms-field__label" for="s3ms_cdn_url"><?php esc_html_e( 'CDN or custom domain URL', 'kazcode-universal-storage' ); ?></label>

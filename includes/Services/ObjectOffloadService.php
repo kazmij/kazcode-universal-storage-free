@@ -114,6 +114,7 @@ final class ObjectOffloadService {
 
 				$head = $this->storage->head_key( $object_key );
 				if ( empty( $head['exists'] ) ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by AttachmentOffloader, redacted/truncated (safe_error_message()), and the one place it reaches HTML (AttachmentDetailsPanel.php) already wraps it in esc_html().
 					throw new \RuntimeException( 'Verification failed after upload for ' . $relative );
 				}
 
@@ -208,6 +209,7 @@ final class ObjectOffloadService {
 			);
 		}
 
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by AttachmentOffloader, redacted/truncated (safe_error_message()), and the one place it reaches HTML (AttachmentDetailsPanel.php) already wraps it in esc_html().
 		throw new \RuntimeException( $message );
 	}
 

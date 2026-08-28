@@ -391,8 +391,10 @@ final class SettingsPage {
 									$opt,
 									'public_base_url',
 									__( 'S3 public / base URL', 'kazcode-universal-storage' ),
+									// phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- example URL inline in translated help text, never fetched as a resource.
 									__( 'Optional override for virtual-hosted or custom domain URLs without a separate CDN (example: https://my-bucket.s3.us-east-1.amazonaws.com). No trailing slash.', 'kazcode-universal-storage' ),
 									(string) $s['public_base_url'],
+									// phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- placeholder/example text shown in the admin input field, never fetched as a resource.
 									'https://my-bucket.s3.amazonaws.com',
 									'url'
 								);
@@ -402,6 +404,7 @@ final class SettingsPage {
 									__( 'CDN or custom domain URL', 'kazcode-universal-storage' ),
 									__( 'Highest priority when set (example: https://cdn.example.com). Used when Serve media from S3 / CDN is on.', 'kazcode-universal-storage' ),
 									(string) $s['cdn_url'],
+									// phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- placeholder/example text shown in the admin input field, never fetched as a resource.
 									'https://cdn.example.com',
 									'url'
 								);

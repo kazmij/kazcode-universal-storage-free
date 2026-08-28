@@ -10,7 +10,6 @@ declare(strict_types=1);
 namespace Kazcode\WpStorage\Tests;
 
 use PHPUnit\Framework\TestCase;
-use Kazcode\WpStorage\Core\Features;
 use Kazcode\WpStorage\Core\ProFeatureGate;
 use Kazcode\WpStorage\Tests\Support\WpStubs;
 
@@ -18,12 +17,6 @@ final class ProFeatureGateTest extends TestCase {
 
 	protected function setUp(): void {
 		WpStubs::reset();
-		add_filter(
-			'kazus_plan',
-			static function (): string {
-				return Features::PLAN_LITE;
-			}
-		);
 	}
 
 	protected function tearDown(): void {

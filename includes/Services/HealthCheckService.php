@@ -34,12 +34,7 @@ final class HealthCheckService {
 	public function run(): array {
 		$stats   = Plugin::instance()->migration_service()->stats();
 		$checks  = array();
-		// Features::plan() is only the raw KAZUS_PLAN constant/filter default — it stays
-		// 'lite' even with an active Pro module, since is_pro_active() checks the module
-		// registry first (see Features::is_pro_active()'s own doc comment). Showing that
-		// raw default here would tell a site with Pro actually installed that it's on
-		// Lite, directly contradicting the "PRO" badge in this same page's header.
-		$plan    = Features::is_pro_active() ? Features::PLAN_PRO : Features::plan();
+		$plan    = Features::plan();
 
 		$checks[] = $this->check(
 			'php',

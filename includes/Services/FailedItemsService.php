@@ -150,6 +150,7 @@ final class FailedItemsService {
 	 * @param int $limit Max rows.
 	 */
 	public function to_csv( int $limit = 5000 ): string {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-memory PHP stream, not a real filesystem path; WP_Filesystem has no equivalent for building a CSV string in memory via fputcsv()/stream_get_contents().
 		$out  = fopen( 'php://temp', 'r+' );
 		if ( $out === false ) {
 			return '';
@@ -186,6 +187,7 @@ final class FailedItemsService {
 		}
 		rewind( $out );
 		$csv = stream_get_contents( $out );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releases the in-memory php://temp stream opened above; no real filesystem path involved, WP_Filesystem is not applicable.
 		fclose( $out );
 		return is_string( $csv ) ? $csv : '';
 	}

@@ -49,13 +49,8 @@ final class ProServices {
 	public static function require( string $id, ...$args ): object {
 		$service = self::get( $id, ...$args );
 		if ( $service === null ) {
-			throw new \RuntimeException(
-				sprintf(
-					/* translators: %s: service id */
-					__( 'Feature "%s" requires KAZCODE Universal Storage Pro.', 'kazcode-universal-storage' ),
-					$id
-				)
-			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by callers and returned only in a WP_CLI::error()/WP_REST_Response JSON payload, never echoed as HTML.
+			throw new \RuntimeException( sprintf( 'Feature "%s" requires KAZCODE Universal Storage Pro.', $id ) );
 		}
 		return $service;
 	}

@@ -9,8 +9,8 @@ WordPress keeps attachment posts, metadata, titles, alt text, and `_wp_attached_
 This repository is the public development source for the **Free** KAZCODE Universal
 Storage WordPress plugin — [product page](https://kazcode.net/universal-storage/). The
 commercial **Pro** add-on is a separate plugin (installed independently, requires Free
-active) and is **not** contained in this repository. WordPress.org listing status: not
-yet submitted as of this writing — do not assume "Approved"/"Official" until that's
+active) and is **not** contained in this repository. WordPress.org listing status:
+submitted and pending review — do not assume "Approved"/"Official" until that's
 actually true.
 
 ## Table of contents
@@ -68,6 +68,9 @@ actually true.
 | Multisite network defaults | — | ✓ |
 
 Free is a complete, standalone product, not a trial — no upload limits, no time limits. Pro is a separate add-on plugin that requires Free to be active; deactivating Pro never deletes data or breaks media already being served.
+
+**KAZCODE Universal Storage Pro:**
+Feature details and plans: https://kazcode.net/universal-storage/#pricing
 
 ## Supported storage providers
 

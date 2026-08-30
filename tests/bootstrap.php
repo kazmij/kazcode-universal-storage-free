@@ -52,6 +52,16 @@ if (!function_exists('sanitize_key')) {
 		return (string) preg_replace('/[^a-z0-9_\-]/', '', $key);
 	}
 }
+if (!function_exists('wp_unslash')) {
+	function wp_unslash($value) {
+		return is_array($value) ? array_map('wp_unslash', $value) : stripslashes((string) $value);
+	}
+}
+if (!function_exists('wp_json_encode')) {
+	function wp_json_encode($data, $options = 0, $depth = 512) {
+		return json_encode($data, (int) $options, (int) $depth);
+	}
+}
 if (!function_exists('apply_filters')) {
 	/** @var array<string, list<array{callback: callable, accepted_args: int}>> */
 	$GLOBALS['s3ms_test_filters'] = array();
@@ -227,6 +237,22 @@ if (!function_exists('get_current_user_id')) {
 		return WpStubs::$current_user_id;
 	}
 }
+if (!function_exists('get_user_meta')) {
+	function get_user_meta($user_id, $key = '', $single = false) {
+		$id = (int) $user_id;
+		if ($key === '') {
+			return WpStubs::$user_meta[ $id ] ?? array();
+		}
+		$value = WpStubs::$user_meta[ $id ][ (string) $key ] ?? '';
+		return $single ? $value : array( $value );
+	}
+}
+if (!function_exists('update_user_meta')) {
+	function update_user_meta($user_id, $meta_key, $meta_value, $prev_value = '') { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		WpStubs::$user_meta[ (int) $user_id ][ (string) $meta_key ] = $meta_value;
+		return true;
+	}
+}
 if (!function_exists('wp_get_current_user')) {
 	function wp_get_current_user() {
 		$user             = new \stdClass();
@@ -242,6 +268,17 @@ if (!function_exists('current_user_can')) {
 if (!function_exists('wp_doing_cron')) {
 	function wp_doing_cron() {
 		return false;
+	}
+}
+if (!function_exists('wp_script_is')) {
+	function wp_script_is($handle, $status = 'enqueued') { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		return ! empty(WpStubs::$scripts[ (string) $handle ]);
+	}
+}
+if (!function_exists('wp_add_inline_script')) {
+	function wp_add_inline_script($handle, $data, $position = 'after') { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		WpStubs::$inline_scripts[ (string) $handle ][] = (string) $data;
+		return true;
 	}
 }
 if (!function_exists('wp_upload_dir')) {

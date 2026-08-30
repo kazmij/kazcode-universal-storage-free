@@ -239,6 +239,10 @@ class Settings {
 
 		$preset = isset( $data['provider_preset'] ) ? sanitize_key( (string) $data['provider_preset'] ) : (string) ( $current['provider_preset'] ?? 'aws' );
 		$out['provider_preset'] = ProviderPresets::get( $preset ) ? $preset : 'aws';
+		if ( $out['provider_preset'] === 'aws' ) {
+			$out['endpoint']         = '';
+			$out['force_path_style'] = false;
+		}
 
 		$mode = isset( $data['credential_mode'] ) ? sanitize_key( (string) $data['credential_mode'] ) : (string) ( $current['credential_mode'] ?? 'keys' );
 		$out['credential_mode'] = in_array( $mode, array( 'keys', 'iam_role' ), true ) ? $mode : 'keys';

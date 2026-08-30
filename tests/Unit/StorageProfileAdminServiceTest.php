@@ -151,6 +151,24 @@ final class StorageProfileAdminServiceTest extends TestCase {
 		$this->assertStringContainsString( 'Pro', (string) ( $result['message'] ?? '' ) );
 	}
 
+	public function test_profile_summary_explains_why_delete_is_not_available(): void {
+		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
+		$profiles->method( 'all' )->willReturn( array( $this->profile( 1, true, false ) ) );
+		$profiles->method( 'count' )->willReturn( 1 );
+
+		$objects = $this->createMock( ObjectRepository::class );
+		$objects->method( 'count_by_profile' )->willReturn( 0 );
+
+		$result = ( new StorageProfileAdminService(
+			$this->createMock( Settings::class ),
+			$profiles,
+			$objects
+		) )->list_summaries();
+
+		$this->assertFalse( $result[0]['can_delete'] );
+		$this->assertSame( 'Cannot delete the only storage profile.', $result[0]['delete_blocked_reason'] );
+	}
+
 	public function test_update_delegates_to_pro_when_multiple_profiles_exist(): void {
 		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
 		$profiles->method( 'count' )->willReturn( 2 );

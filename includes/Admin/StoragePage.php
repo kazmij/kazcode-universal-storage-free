@@ -124,6 +124,8 @@ final class StoragePage {
 											<?php endif; ?>
 											<?php if ( ! empty( $profile['can_delete'] ) ) : ?>
 												<button type="button" class="button button-small s3ms-profile-delete" data-profile-id="<?php echo esc_attr( (string) ( $profile['id'] ?? 0 ) ); ?>"><?php esc_html_e( 'Delete', 'kazcode-universal-storage' ); ?></button>
+											<?php else : ?>
+												<button type="button" class="button button-small" disabled title="<?php echo esc_attr( (string) ( $profile['delete_blocked_reason'] ?? '' ) ); ?>"><?php esc_html_e( 'Delete', 'kazcode-universal-storage' ); ?></button>
 											<?php endif; ?>
 										</td>
 									</tr>

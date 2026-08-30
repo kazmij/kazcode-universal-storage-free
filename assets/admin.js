@@ -805,6 +805,20 @@
 			fetch(s3msAdmin.ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body });
 		}
 
+		function disableAllToursOnServer() {
+			if (window.s3msTour) {
+				window.s3msTour.dismissed = true;
+				window.s3msTour.globallyDisabled = true;
+			}
+			if (!s3msAdmin.ajaxUrl || !s3msAdmin.ajaxNonce) {
+				return;
+			}
+			var body = new FormData();
+			body.append('action', 'kazus_disable_tours');
+			body.append('nonce', s3msAdmin.ajaxNonce);
+			fetch(s3msAdmin.ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body });
+		}
+
 		function clearHighlight() {
 			document.querySelectorAll('.s3ms-tour-target').forEach(function (el) {
 				el.classList.remove('s3ms-tour-target');
@@ -856,6 +870,7 @@
 				(current > 0 ? '<button type="button" class="button" data-tour-back>' + 'Back' + '</button>' : '') +
 				'</span>' +
 				'<span class="s3ms-tour__actions-right">' +
+				'<button type="button" class="button" data-tour-disable-all>Disable tutorials</button>' +
 				'<button type="button" class="button" data-tour-skip>Skip</button>' +
 				'<button type="button" class="button button-primary" data-tour-next>' +
 				(isLast ? 'Finish' : 'Next') +
@@ -886,6 +901,10 @@
 			tooltip.querySelector('[data-tour-skip]').addEventListener('click', function () {
 				endTour(true);
 			});
+			tooltip.querySelector('[data-tour-disable-all]').addEventListener('click', function () {
+				endTour(false);
+				disableAllToursOnServer();
+			});
 			tooltip.querySelector('[data-tour-next]').addEventListener('click', function () {
 				if (isLast) {
 					endTour(true);
@@ -914,6 +933,15 @@
 		if (replayBtn) {
 			replayBtn.addEventListener('click', function () {
 				startTour();
+			});
+		}
+		var disableAllBtn = document.getElementById('s3ms-tour-disable-all');
+		if (disableAllBtn) {
+			disableAllBtn.addEventListener('click', function () {
+				endTour(false);
+				disableAllToursOnServer();
+				disableAllBtn.textContent = 'Tutorials disabled';
+				disableAllBtn.disabled = true;
 			});
 		}
 

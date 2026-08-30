@@ -216,6 +216,9 @@ final class AdminLayout {
 				<span class="dashicons dashicons-lightbulb" aria-hidden="true"></span>
 				<?php esc_html_e( 'Show tutorial', 'kazcode-universal-storage' ); ?>
 			</button>
+			<button type="button" id="s3ms-tour-disable-all" class="button">
+				<?php esc_html_e( 'Disable tutorials', 'kazcode-universal-storage' ); ?>
+			</button>
 		</p>
 		<?php
 	}

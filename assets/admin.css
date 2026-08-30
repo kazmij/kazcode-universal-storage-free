@@ -859,6 +859,10 @@
 }
 
 .s3ms-tour-launch {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
 	margin: -10px 0 16px;
 }
 
@@ -866,6 +870,8 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
+	min-height: 30px;
+	margin: 0;
 }
 
 /* dashicons glyphs render visually low within their own em-box even when

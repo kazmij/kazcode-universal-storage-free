@@ -26,9 +26,13 @@ final class OnboardingTour {
 	/** @var string User meta key; value is array<string,bool> keyed by admin page slug. */
 	private const USER_META_KEY = 's3ms_tour_dismissed';
 
+	/** @var string User meta key; truthy value suppresses automatic tours on every admin screen. */
+	private const GLOBAL_DISABLE_META_KEY = 's3ms_tours_disabled';
+
 	public function register(): void {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue' ), 20 );
 		add_action( 'wp_ajax_kazus_dismiss_tour', array( $this, 'ajax_dismiss' ) );
+		add_action( 'wp_ajax_kazus_disable_tours', array( $this, 'ajax_disable_all' ) );
 	}
 
 	/**
@@ -44,14 +48,16 @@ final class OnboardingTour {
 		}
 
 		$page      = $this->current_page_slug();
-		$dismissed = $this->is_dismissed( $page );
+		$disabled  = $this->are_all_tours_disabled();
+		$dismissed = $disabled || $this->is_dismissed( $page );
 
 		wp_add_inline_script(
 			's3ms-admin',
 			'window.s3msTour = ' . wp_json_encode(
 				array(
-					'dismissed' => $dismissed,
-					'page'      => $page,
+					'dismissed'        => $dismissed,
+					'globallyDisabled' => $disabled,
+					'page'             => $page,
 				)
 			) . ';',
 			'before'
@@ -82,6 +88,22 @@ final class OnboardingTour {
 	}
 
 	/**
+	 * AJAX: disable automatic tours on every Universal Storage admin page for
+	 * the current user. Manual replay remains available.
+	 *
+	 * @return void
+	 */
+	public function ajax_disable_all(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Forbidden.', 'kazcode-universal-storage' ) ), 403 );
+		}
+		check_ajax_referer( 's3ms_admin', 'nonce' );
+
+		update_user_meta( get_current_user_id(), self::GLOBAL_DISABLE_META_KEY, true );
+		wp_send_json_success();
+	}
+
+	/**
 	 * Admin page slug for the current request ("media" from
 	 * kazcode-universal-storage-media, "dashboard" for the bare top-level
 	 * slug), or "media-library" for WP core's own Media Library screen.
@@ -107,5 +129,9 @@ final class OnboardingTour {
 
 	private function is_dismissed( string $page ): bool {
 		return ! empty( $this->all_dismissed()[ $page ] );
+	}
+
+	private function are_all_tours_disabled(): bool {
+		return ! empty( get_user_meta( get_current_user_id(), self::GLOBAL_DISABLE_META_KEY, true ) );
 	}
 }

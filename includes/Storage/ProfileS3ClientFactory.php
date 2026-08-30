@@ -57,10 +57,11 @@ final class ProfileS3ClientFactory {
 			}
 		}
 
-		if ( $profile->endpoint !== '' ) {
+		$is_aws_profile = $profile->provider_type === 'aws';
+		if ( ! $is_aws_profile && $profile->endpoint !== '' ) {
 			$config['endpoint'] = $profile->endpoint;
 		}
-		if ( $profile->path_style ) {
+		if ( ! $is_aws_profile && $profile->path_style ) {
 			$config['use_path_style_endpoint'] = true;
 		}
 

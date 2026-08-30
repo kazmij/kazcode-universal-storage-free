@@ -110,6 +110,8 @@ Release builds use Composer and PHP-Scoper (third-party dependencies are namespa
 * Fixed remote-only media compatibility with WordPress editor and REST workflows.
 * Improved restore and partial-failure safety.
 * Hardened concurrent attachment operations against stale workers.
+* Fixed Amazon S3 preset handling so stale custom endpoint settings cannot be reused for AWS connections.
+* Added a global admin control to disable onboarding tutorials across plugin screens.
 * Improved Composer and AWS SDK dependency isolation for compatibility with other plugins and Composer-based WordPress installations.
 
 = 1.0.0 =

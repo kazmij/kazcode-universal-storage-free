@@ -205,4 +205,22 @@ final class SettingsTest extends TestCase {
 		$this->assertSame('offloaded', \Kazcode\WpStorage\Attachment\AttachmentOffloader::STATUS_OFFLOADED);
 		$this->assertSame('failed', \Kazcode\WpStorage\Attachment\AttachmentOffloader::STATUS_FAILED);
 	}
+
+	public function test_aws_preset_clears_hidden_custom_endpoint_fields_on_save(): void {
+		$settings = new Settings();
+		$clean    = $settings->sanitize(
+			array(
+				'_s3ms_full_form' => '1',
+				'provider_preset' => 'aws',
+				'bucket'          => 'kazcode-test',
+				'region'          => 'us-east-1',
+				'endpoint'        => 'http://minio:9000',
+				'force_path_style'=> '1',
+			),
+			Settings::defaults()
+		);
+
+		$this->assertSame( '', $clean['endpoint'] );
+		$this->assertFalse( $clean['force_path_style'] );
+	}
 }

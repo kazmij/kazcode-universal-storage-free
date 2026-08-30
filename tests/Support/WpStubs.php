@@ -26,6 +26,15 @@ final class WpStubs {
 	/** @var array<string, mixed> */
 	public static array $site_options = array();
 
+	/** @var array<int, array<string, mixed>> */
+	public static array $user_meta = array();
+
+	/** @var array<string, bool> */
+	public static array $scripts = array();
+
+	/** @var array<string, list<string>> */
+	public static array $inline_scripts = array();
+
 	/** @var bool */
 	public static bool $is_multisite = false;
 
@@ -55,6 +64,9 @@ final class WpStubs {
 		self::$posts              = array();
 		self::$options            = array();
 		self::$site_options       = array();
+		self::$user_meta          = array();
+		self::$scripts            = array();
+		self::$inline_scripts     = array();
 		self::$is_multisite       = false;
 		self::$deleted_files      = array();
 		self::$scheduled_hooks    = array();

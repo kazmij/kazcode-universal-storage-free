@@ -237,6 +237,8 @@ final class StorageProfileAdminService {
 	private function summarize( StorageProfile $profile ): array {
 		$id           = (int) ( $profile->id ?? 0 );
 		$object_count = $id > 0 ? $this->objects->count_by_profile( $id ) : 0;
+		$profile_count = $this->profiles->count();
+		$can_delete    = $object_count === 0 && ! $profile->is_default_upload_target && $profile_count > 1;
 
 		return array(
 			'id'                       => $id,
@@ -264,11 +266,23 @@ final class StorageProfileAdminService {
 			'location_locked'          => $profile->location_locked,
 			'object_count'             => $object_count,
 			'location_editable'        => ! $profile->location_locked && ( $object_count === 0 || $profile->bucket === '' ),
-			'can_delete'               => $object_count === 0
-				&& ! $profile->is_default_upload_target
-				&& $this->profiles->count() > 1,
+			'can_delete'               => $can_delete,
+			'delete_blocked_reason'    => $can_delete ? '' : $this->delete_blocked_reason( $profile, $object_count, $profile_count ),
 			'uses_site_credentials'    => $profile->credentials_ref === LegacyProfileMigrator::CREDENTIALS_REF,
 		);
+	}
+
+	private function delete_blocked_reason( StorageProfile $profile, int $object_count, int $profile_count ): string {
+		if ( $profile_count <= 1 ) {
+			return __( 'Cannot delete the only storage profile.', 'kazcode-universal-storage' );
+		}
+		if ( $profile->is_default_upload_target ) {
+			return __( 'Set another profile as default before deleting this one.', 'kazcode-universal-storage' );
+		}
+		if ( $object_count > 0 ) {
+			return __( 'Cannot delete a profile that still has object inventory rows.', 'kazcode-universal-storage' );
+		}
+		return __( 'This storage profile cannot be deleted.', 'kazcode-universal-storage' );
 	}
 
 	/**
@@ -322,8 +336,8 @@ final class StorageProfileAdminService {
 			$fields['provider_type'] = $provider;
 			$fields['bucket']        = $bucket;
 			$fields['region']        = sanitize_text_field( (string) ( $input['region'] ?? 'us-east-1' ) );
-			$fields['endpoint']      = esc_url_raw( untrailingslashit( (string) ( $input['endpoint'] ?? '' ) ) );
-			$fields['path_style']    = ! empty( $input['path_style'] );
+			$fields['endpoint']      = $provider === 'aws' ? '' : esc_url_raw( untrailingslashit( (string) ( $input['endpoint'] ?? '' ) ) );
+			$fields['path_style']    = $provider === 'aws' ? false : ! empty( $input['path_style'] );
 			$fields['prefix']      = $prefix;
 		} elseif ( $existing !== null ) {
 			$fields['provider_type'] = $existing->provider_type;

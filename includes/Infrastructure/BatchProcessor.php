@@ -130,6 +130,16 @@ final class BatchProcessor {
 
 		register_rest_route(
 			'kazcode-storage/v1',
+			'/failed/clear',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array($this, 'rest_failed_clear'),
+				'permission_callback' => array($this, 'can_manage'),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
 			'/background',
 			array(
 				'methods'             => 'GET',
@@ -407,6 +417,35 @@ final class BatchProcessor {
 			array(
 				'updated' => $updated,
 				'ignored' => $ignored,
+			),
+			200
+		);
+	}
+
+	/**
+	 * Clear this plugin's own failed/offload bookkeeping for the given
+	 * attachments — never the attachment post, local file, or remote object.
+	 *
+	 * @param \WP_REST_Request $request Request.
+	 */
+	public function rest_failed_clear(\WP_REST_Request $request): \WP_REST_Response {
+		$ids     = $request->get_param('ids');
+		$ids     = is_array($ids) ? array_map('intval', $ids) : array();
+		$cleared = (new FailedItemsService())->clear($ids);
+
+		if ($cleared > 0) {
+			(new AuditLog())->record(
+				'failed_items_cleared',
+				array(
+					'count' => $cleared,
+					'ids'   => array_slice($ids, 0, 20),
+				)
+			);
+		}
+
+		return new \WP_REST_Response(
+			array(
+				'cleared' => $cleared,
 			),
 			200
 		);

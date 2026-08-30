@@ -12,7 +12,10 @@ namespace Kazcode\WpStorage\Attachment;
 defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Domain\RemoteObservation;
+use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
 use Kazcode\WpStorage\Infrastructure\AttachmentLock;
+use Kazcode\WpStorage\Infrastructure\LeaseLostException;
 use Kazcode\WpStorage\Services\AttachmentReconciler;
 use Kazcode\WpStorage\Services\CleanupLocalFiles;
 use Kazcode\WpStorage\Services\ObjectOffloadService;
@@ -237,7 +240,8 @@ final class AttachmentOffloader {
 	 * @return array{success:bool,message:string,files?:int,keys?:list<string>}
 	 */
 	public function offload(int $attachment_id, ?bool $delete_local = null, ?array $metadata_override = null): array {
-		if (!$this->lock->acquire($attachment_id, 'migrate')) {
+		$lease = $this->lock->acquire_lease($attachment_id, 'migrate');
+		if (!$lease instanceof AttachmentLeaseHandle) {
 			return array(
 				'success' => false,
 				'message' => 'Attachment is locked by another operation.',
@@ -250,7 +254,7 @@ final class AttachmentOffloader {
 				delete_post_meta($attachment_id, '_s3ms_last_error');
 
 				$service = new ObjectOffloadService($this->settings, $this->storage, $this->files);
-				return $service->offload($attachment_id, $delete_local, $metadata_override);
+				return $service->offload($attachment_id, $delete_local, $metadata_override, $this->lock, $lease);
 			}
 
 			$uploaded_keys = array();
@@ -286,18 +290,26 @@ final class AttachmentOffloader {
 				$original_key = $uploaded_keys[0];
 			}
 
-			$missing = array();
+			$verification_failures = array();
 			foreach (array_keys($local_files) as $relative) {
 				$head = $this->storage->head_relative($relative);
-				if (empty($head['exists'])) {
-					$missing[] = $relative;
+				$size = is_file($local_files[$relative]) ? (int) filesize($local_files[$relative]) : null;
+				$observation = RemoteObservation::from_head_result($head, $size);
+				if (!$observation->is_size_verified()) {
+					$reason = match ($observation->verification_level) {
+						RemoteObservation::SIZE_MISMATCH => 'remote size mismatch',
+						RemoteObservation::NOT_VERIFIED => $observation->is_confirmed_missing() ? 'remote confirmed missing' : 'remote status unknown',
+						default => 'remote size not verified',
+					};
+					$verification_failures[] = $relative . ' (' . $reason . ')';
 				}
 			}
 
-			if ($missing !== array()) {
-				throw new \RuntimeException('Verification failed for: ' . implode(', ', array_slice($missing, 0, 5)));
+			if ($verification_failures !== array()) {
+				throw new \RuntimeException('Verification failed for: ' . implode(', ', array_slice($verification_failures, 0, 5)));
 			}
 
+			$this->renew_or_abort($lease, 'offload metadata commit');
 			update_post_meta($attachment_id, '_s3ms_status', self::STATUS_OFFLOADED);
 			update_post_meta($attachment_id, '_s3ms_original_key', $original_key);
 			update_post_meta($attachment_id, '_s3ms_offloaded_at', gmdate('c'));
@@ -321,11 +333,15 @@ final class AttachmentOffloader {
 				);
 			}
 
+			$this->renew_or_abort($lease, 'local cleanup');
 			$cleanup = ( new CleanupLocalFiles( $this->settings, $this->storage ) )->maybe_cleanup(
 				$attachment_id,
 				$local_files,
 				$manifest_items,
-				$delete_local
+				$delete_local,
+				null,
+				$this->lock,
+				$lease
 			);
 			if ( $cleanup['skipped'] && str_contains( $cleanup['message'], 'verify failure' ) ) {
 				return array(
@@ -342,7 +358,18 @@ final class AttachmentOffloader {
 				'files'   => count($uploaded_keys),
 				'keys'    => $uploaded_keys,
 			);
+		} catch (LeaseLostException $e) {
+			return array(
+				'success' => false,
+				'message' => $this->safe_error_message( $e ) . ' Retry required.',
+			);
 		} catch (\Throwable $e) {
+			if ( ! $this->lock->renew( $lease ) ) {
+				return array(
+					'success' => false,
+					'message' => 'Operation ownership lost; retry required.',
+				);
+			}
 			update_post_meta($attachment_id, '_s3ms_status', self::STATUS_FAILED);
 			update_post_meta($attachment_id, '_s3ms_last_error', $this->safe_error_message($e));
 			return array(
@@ -350,7 +377,14 @@ final class AttachmentOffloader {
 				'message' => $this->safe_error_message($e),
 			);
 		} finally {
-			$this->lock->release($attachment_id);
+			$this->lock->release_lease($lease);
+		}
+	}
+
+	private function renew_or_abort( AttachmentLeaseHandle $lease, string $stage ): void {
+		if ( ! $this->lock->renew( $lease ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $stage is an internal fixed call-site label, then passed through safe_error_message() before any UI display.
+			throw new LeaseLostException( 'Attachment operation ownership lost before ' . $stage . '.' );
 		}
 	}
 

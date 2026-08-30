@@ -52,6 +52,15 @@ Run against a WordPress site with the plugin activated and a writable S3 (or Min
 2. Delete Permanently an offloaded attachment.
 3. Confirm original + sizes removed from S3 (HEAD fails). No recursive prefix wipe of other objects.
 
+## Scenario H — Clear a failed item and re-offload from scratch
+
+1. Force a failure (e.g. break credentials temporarily) and upload a JPG so it lands in Media → Failed items.
+2. Confirm the row appears with its error message.
+3. Restore credentials. Select the row, click **Clear selected**, confirm the dialog.
+4. Confirm the row disappears from the Failed items list (all filters) and the plugin's own `_s3ms_*` postmeta is gone for that attachment — but the attachment post and local file are untouched.
+5. Re-trigger an offload for that attachment (e.g. Media Library bulk action → Offload). Confirm it succeeds cleanly, as if never previously attempted.
+6. Check Logs (Pro) for a `failed_items_cleared` entry with the right count.
+
 ## CLI smoke
 
 ```bash

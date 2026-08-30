@@ -15,6 +15,8 @@ use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Domain\StorageProfile;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
+use Kazcode\WpStorage\Services\ProfileObjectLocation;
+use Kazcode\WpStorage\Services\ProfileObjectLocator;
 
 /**
  * Resolve delivery URL from the object's bound Storage Profile, not live Settings.
@@ -25,9 +27,11 @@ final class ProfileDeliveryUrlResolver {
 		private ?ObjectRepository $objects = null,
 		private ?WpdbStorageProfileRepository $profiles = null,
 		private ?PublicUrlResolver $fallback = null,
+		private ?ProfileObjectLocator $locator = null,
 	) {
 		$this->objects  = $objects ?? new ObjectRepository();
 		$this->profiles = $profiles ?? new WpdbStorageProfileRepository();
+		$this->locator  = $locator ?? new ProfileObjectLocator( $this->objects, $this->profiles );
 	}
 
 	/**
@@ -39,52 +43,15 @@ final class ProfileDeliveryUrlResolver {
 			return '';
 		}
 
-		$row = $this->find_row_for_relative( $attachment_id, $relative );
-		if ( $row === null ) {
+		$location = $this->locator->locate( $attachment_id, $relative );
+		if ( $location->status === ProfileObjectLocation::NOT_IN_INVENTORY ) {
 			return $this->fallback()->url_for_relative( $relative );
 		}
-
-		$profile_id = (int) ( $row['storage_profile_id'] ?? 0 );
-		$profile    = $profile_id > 0 ? $this->profiles->find( $profile_id ) : null;
-		if ( $profile === null ) {
-			return $this->fallback()->url_for_relative( $relative );
+		if ( ! $location->is_found() || $location->storage_profile === null || $location->object_key === '' ) {
+			return '';
 		}
 
-		$object_key = (string) ( $row['object_key'] ?? '' );
-		if ( $object_key === '' ) {
-			return $this->fallback()->url_for_relative( $relative );
-		}
-
-		return $this->url_for_profile_key( $profile, $object_key, $relative );
-	}
-
-	/**
-	 * A migration (or crop/regenerate) leaves the superseded row behind as `stale`
-	 * rather than deleting it, so the same relative path can match more than one
-	 * row — e.g. one `stale` row still on the old profile plus one `present` row
-	 * on the new one after Pro storage-profile migration. Rows are ordered by id
-	 * ascending, so a naive first-match would keep resolving to the old (stale)
-	 * profile's URL right after a successful migration. Prefer the first
-	 * non-stale/non-deleted match; only fall back to a stale/deleted row if
-	 * nothing else matches this path at all.
-	 *
-	 * @return array<string, mixed>|null
-	 */
-	private function find_row_for_relative( int $attachment_id, string $relative ): ?array {
-		$fallback = null;
-		foreach ( $this->objects->find_by_attachment( $attachment_id ) as $row ) {
-			$row_rel = trim( str_replace( '\\', '/', (string) ( $row['local_relative_path'] ?? '' ) ), '/' );
-			if ( $row_rel !== $relative ) {
-				continue;
-			}
-			$status = (string) ( $row['remote_status'] ?? '' );
-			if ( $status === ObjectRemoteStatus::STALE || $status === ObjectRemoteStatus::DELETED ) {
-				$fallback ??= $row;
-				continue;
-			}
-			return $row;
-		}
-		return $fallback;
+		return $this->url_for_profile_key( $location->storage_profile, $location->object_key, $relative );
 	}
 
 	public function url_for_profile_key( StorageProfile $profile, string $object_key, string $relative = '' ): string {

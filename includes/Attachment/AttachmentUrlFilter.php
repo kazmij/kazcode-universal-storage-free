@@ -12,6 +12,7 @@ namespace Kazcode\WpStorage\Attachment;
 defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Services\ProfileAwareObjectOperations;
 use Kazcode\WpStorage\Storage\ProfileDeliveryUrlResolver;
 use Kazcode\WpStorage\Storage\PublicUrlResolver;
 use Kazcode\WpStorage\Storage\S3KeyResolver;
@@ -27,13 +28,22 @@ final class AttachmentUrlFilter {
 	private ProfileDeliveryUrlResolver $profile_urls;
 	private S3KeyResolver $keys;
 	private ?S3Storage $storage;
+	private ProfileAwareObjectOperations $profile_ops;
 
-	public function __construct(Settings $settings, PublicUrlResolver $urls, S3KeyResolver $keys, ?S3Storage $storage = null, ?ProfileDeliveryUrlResolver $profile_urls = null) {
+	public function __construct(
+		Settings $settings,
+		PublicUrlResolver $urls,
+		S3KeyResolver $keys,
+		?S3Storage $storage = null,
+		?ProfileDeliveryUrlResolver $profile_urls = null,
+		?ProfileAwareObjectOperations $profile_ops = null
+	) {
 		$this->settings     = $settings;
 		$this->urls         = $urls;
 		$this->profile_urls = $profile_urls ?? new ProfileDeliveryUrlResolver( fallback: $urls );
 		$this->keys         = $keys;
 		$this->storage      = $storage;
+		$this->profile_ops  = $profile_ops ?? new ProfileAwareObjectOperations( legacy: $storage, settings: $settings );
 	}
 
 	/**
@@ -258,7 +268,7 @@ final class AttachmentUrlFilter {
 	private function serve_url_for_relative( string $relative, int $attachment_id ): string {
 		if ( $this->settings->is_private_media() && $this->storage !== null ) {
 			try {
-				return $this->storage->presigned_url_for_relative( $relative, $this->settings->signed_url_ttl() );
+				return $this->profile_ops->presigned_url_for_attachment_relative( $attachment_id, $relative, $this->settings->signed_url_ttl() );
 			} catch ( \Throwable $e ) {
 				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 					// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log

@@ -31,6 +31,7 @@ use Kazcode\WpStorage\Attachment\LocalFileProvider;
 use Kazcode\WpStorage\CLI\CliCommand;
 use Kazcode\WpStorage\Core\Module\ModuleRegistry;
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Domain\ArrayDiff;
 use Kazcode\WpStorage\Infrastructure\BatchProcessor;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueFactory;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueGateway;
@@ -106,9 +107,23 @@ final class Plugin {
 
 		add_action(
 			'update_option_' . Settings::OPTION_KEY,
-			function (): void {
+			/**
+			 * @param mixed $old_value Previous option value, from the update_option_{$option} hook.
+			 * @param mixed $value New option value, from the same hook.
+			 */
+			function ( $old_value, $value ): void {
 				$this->settings->flush_cache();
-				$this->audit_log()->record('settings_saved', array());
+				// Field NAMES only, never values (see ArrayDiff) — this option
+				// never stores the actual secret (that lives in its own
+				// encrypted option with its own audit hook below), but some
+				// fields here (bucket, endpoint, etc.) are still
+				// infrastructure detail this log shouldn't need to reproduce
+				// to be useful.
+				$changed = ArrayDiff::changed_keys(
+					is_array( $old_value ) ? $old_value : array(),
+					is_array( $value ) ? $value : array()
+				);
+				$this->audit_log()->record( 'settings_saved', array( 'changed_fields' => $changed ) );
 				try {
 					( new LegacyProfileMigrator( $this->settings, new WpdbStorageProfileRepository() ) )
 						->sync_default_profile_from_settings();
@@ -118,7 +133,9 @@ final class Plugin {
 						error_log( 'KAZCODE Universal Storage default profile sync failed: ' . $e->getMessage() );
 					}
 				}
-			}
+			},
+			10,
+			2
 		);
 		add_action(
 			'update_option_' . Settings::ENCRYPTED_SECRET_KEY,

@@ -17,9 +17,21 @@ use Kazcode\WpStorage\Infrastructure\Queue\JobHandlerInterface;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
 use Kazcode\WpStorage\Plugin;
+use Kazcode\WpStorage\Services\AuditLog;
 use Kazcode\WpStorage\Storage\ProfileStorageGateway;
 
 final class DeleteSourceObjectJobHandler implements JobHandlerInterface {
+
+	public function __construct(
+		private ?ObjectRepository $objects = null,
+		private ?WpdbStorageProfileRepository $profiles = null,
+		private $settings = null,
+		private $gateway_factory = null,
+	) {
+		$this->objects  = $objects ?? new ObjectRepository();
+		$this->profiles = $profiles ?? new WpdbStorageProfileRepository();
+		$this->settings = $settings;
+	}
 
 	public function type(): string {
 		return QueueJobType::DELETE_SOURCE_OBJECT;
@@ -38,8 +50,7 @@ final class DeleteSourceObjectJobHandler implements JobHandlerInterface {
 			);
 		}
 
-		$profiles = new WpdbStorageProfileRepository();
-		$profile  = $profiles->find( $profile_id );
+		$profile  = $this->profiles->find( $profile_id );
 		if ( $profile === null ) {
 			return array(
 				'success' => false,
@@ -47,20 +58,52 @@ final class DeleteSourceObjectJobHandler implements JobHandlerInterface {
 			);
 		}
 
-		$gateway = new ProfileStorageGateway( $profile, Plugin::instance()->settings() );
+		$rows = $this->objects->find_by_profile_and_key( $profile_id, $key );
+		if ( ! $this->can_delete_source_key( $rows ) ) {
+			$this->record_skip( $profile_id, $key, 'active_or_ambiguous_reference' );
+			return array(
+				'success' => true,
+				'message' => 'Source object delete skipped: active or ambiguous inventory reference.',
+			);
+		}
+
+		$gateway = $this->gateway_factory
+			? ( $this->gateway_factory )( $profile )
+			: new ProfileStorageGateway( $profile, $this->settings ?? Plugin::instance()->settings() );
 		$gateway->delete_key( $key );
 
-		global $wpdb;
-		// $table is a fixed literal ('s3ms_objects') prefixed with $wpdb->prefix —
-		// never user-controlled — and every value below is bound via
-		// $wpdb->prepare()'s %s/%d placeholders.
-		$table = $wpdb->prefix . 's3ms_objects';
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- plugin-owned table (fixed name, not user input); values bound via prepare().
-		$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET remote_status = %s, updated_at = %s WHERE storage_profile_id = %d AND object_key = %s", ObjectRemoteStatus::DELETED, gmdate( 'Y-m-d H:i:s' ), $profile_id, $key ) );
+		$this->objects->mark_deleted_by_profile_key_if_stale( $profile_id, $key );
 
 		return array(
 			'success' => true,
 			'message' => 'Source object deleted.',
+		);
+	}
+
+	/**
+	 * @param list<array<string, mixed>> $rows
+	 */
+	private function can_delete_source_key( array $rows ): bool {
+		if ( $rows === array() ) {
+			return false;
+		}
+		foreach ( $rows as $row ) {
+			$status = (string) ( $row['remote_status'] ?? '' );
+			if ( ! in_array( $status, array( ObjectRemoteStatus::STALE, ObjectRemoteStatus::DELETED ), true ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private function record_skip( int $profile_id, string $key, string $reason ): void {
+		( new AuditLog() )->record(
+			'remote_delete_skipped_source_cleanup',
+			array(
+				'storage_profile_id' => $profile_id,
+				'object_key_hash'    => hash( 'sha256', $key ),
+				'reason'             => $reason,
+			)
 		);
 	}
 }

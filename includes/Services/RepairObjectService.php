@@ -14,6 +14,9 @@ defined( 'ABSPATH' ) || exit;
 use Kazcode\WpStorage\Domain\AttachmentSyncDeriver;
 use Kazcode\WpStorage\Domain\ObjectHealthState;
 use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
+use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
+use Kazcode\WpStorage\Infrastructure\AttachmentLock;
+use Kazcode\WpStorage\Infrastructure\LeaseLostException;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Storage\PathGuard;
 use Kazcode\WpStorage\Storage\S3Storage;
@@ -26,8 +29,12 @@ final class RepairObjectService {
 	public function __construct(
 		private S3Storage $storage,
 		private ?ObjectRepository $objects = null,
+		private ?ProfileAwareObjectOperations $profile_ops = null,
+		private ?AttachmentLock $lock = null,
 	) {
-		$this->objects = $objects ?? new ObjectRepository();
+		$this->objects     = $objects ?? new ObjectRepository();
+		$this->profile_ops = $profile_ops ?? new ProfileAwareObjectOperations( legacy: $storage );
+		$this->lock        = $lock ?? new AttachmentLock();
 	}
 
 	/**
@@ -77,15 +84,27 @@ final class RepairObjectService {
 				'message' => 'Object key missing on row.',
 			);
 		}
+		$attachment_id = (int) ( $row['attachment_id'] ?? 0 );
+		$lease         = null;
+		if ( $attachment_id > 0 ) {
+			$lease = $this->lock->acquire_lease( $attachment_id, 'repair' );
+			if ( ! $lease instanceof AttachmentLeaseHandle ) {
+				return array(
+					'success' => false,
+					'message' => 'Attachment is locked by another operation.',
+					'health'  => $health,
+				);
+			}
+		}
 
 		try {
-			$this->storage->upload_file_to_key( $absolute, $key, $relative );
-			$head = $this->storage->head_key( $key );
-			if ( empty( $head['exists'] ) ) {
+			$upload = $this->profile_ops->upload_file_for_object_row( $row, $absolute );
+			if ( empty( $upload['success'] ) ) {
 				throw new \RuntimeException( 'Verification failed after repair upload.' );
 			}
 
 			$now = gmdate( 'Y-m-d H:i:s' );
+			$this->renew_or_abort( $lease, 'repair inventory commit' );
 			$this->objects->upsert(
 				array(
 					'attachment_id'       => (int) ( $row['attachment_id'] ?? 0 ),
@@ -102,10 +121,10 @@ final class RepairObjectService {
 				)
 			);
 
-			$attachment_id = (int) ( $row['attachment_id'] ?? 0 );
 			if ( $attachment_id > 0 ) {
 				$rows   = $this->objects->find_by_attachment( $attachment_id );
 				$status = AttachmentSyncDeriver::derive_status( $rows );
+				$this->renew_or_abort( $lease, 'repair attachment metadata commit' );
 				update_post_meta( $attachment_id, '_s3ms_status', $status );
 				if ( $status === \Kazcode\WpStorage\Attachment\AttachmentOffloader::STATUS_OFFLOADED ) {
 					delete_post_meta( $attachment_id, '_s3ms_last_error' );
@@ -119,7 +138,20 @@ final class RepairObjectService {
 				'message' => 'Re-uploaded ' . $relative,
 				'health'  => ObjectHealthState::HEALTHY,
 			);
+		} catch ( LeaseLostException $e ) {
+			return array(
+				'success' => false,
+				'message' => 'Operation ownership lost; retry required.',
+				'health'  => $health,
+			);
 		} catch ( \Throwable $e ) {
+			if ( $lease instanceof AttachmentLeaseHandle && ! $this->lock->renew( $lease ) ) {
+				return array(
+					'success' => false,
+					'message' => 'Operation ownership lost; retry required.',
+					'health'  => $health,
+				);
+			}
 			$this->objects->upsert(
 				array(
 					'attachment_id'       => (int) ( $row['attachment_id'] ?? 0 ),
@@ -136,6 +168,20 @@ final class RepairObjectService {
 				'message' => $e->getMessage(),
 				'health'  => ObjectHealthState::FAILED_UPLOAD,
 			);
+		} finally {
+			if ( $lease instanceof AttachmentLeaseHandle ) {
+				$this->lock->release_lease( $lease );
+			}
+		}
+	}
+
+	private function renew_or_abort( ?AttachmentLeaseHandle $lease, string $stage ): void {
+		unset( $stage );
+		if ( ! $lease instanceof AttachmentLeaseHandle ) {
+			return;
+		}
+		if ( ! $this->lock->renew( $lease ) ) {
+			throw new LeaseLostException( 'Attachment operation ownership lost before a guarded commit.' );
 		}
 	}
 

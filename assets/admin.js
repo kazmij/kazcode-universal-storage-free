@@ -397,6 +397,20 @@
 				loadFailed();
 			});
 		}
+		var clearBtn = document.getElementById('s3ms-failed-clear-selected');
+		if (clearBtn) {
+			clearBtn.addEventListener('click', async function () {
+				var ids = selectedFailedIds();
+				if (!ids.length) {
+					return;
+				}
+				if (!window.confirm('Clear failure tracking for ' + ids.length + ' item(s)? The media file and attachment are never touched, and a future offload/retry will start fresh.')) {
+					return;
+				}
+				await post('failed/clear', { ids: ids });
+				loadFailed();
+			});
+		}
 		var exportBtn = document.getElementById('s3ms-failed-export');
 		if (exportBtn) {
 			exportBtn.addEventListener('click', async function (ev) {
@@ -828,7 +842,12 @@
 			var text = step.getAttribute('data-s3ms-tour-text') || '';
 			var isLast = current === steps.length - 1;
 
+			// The "x" close control below is deliberately independent of the
+			// Skip/Finish buttons and of isLast — closing the tour must never
+			// depend on which step is currently showing or on any per-step
+			// content/attributes rendering correctly.
 			tooltip.innerHTML =
+				'<button type="button" class="s3ms-tour__close" data-tour-close aria-label="Close">&times;</button>' +
 				'<p class="s3ms-tour__progress"></p>' +
 				'<h3 class="s3ms-tour__title"></h3>' +
 				'<p class="s3ms-tour__text"></p>' +
@@ -847,6 +866,9 @@
 			tooltip.querySelector('.s3ms-tour__progress').textContent = current + 1 + ' / ' + steps.length;
 			tooltip.querySelector('.s3ms-tour__title').textContent = title;
 			tooltip.querySelector('.s3ms-tour__text').textContent = text;
+			tooltip.querySelector('[data-tour-close]').addEventListener('click', function () {
+				endTour(true);
+			});
 
 			window.setTimeout(function () {
 				if (tooltip) {

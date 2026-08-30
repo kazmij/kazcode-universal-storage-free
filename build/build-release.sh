@@ -151,6 +151,9 @@ composer_in_stage
 echo "==> Scope vendor + patch includes"
 scope_in_stage
 
+echo "==> Repair scoped Composer autoload maps"
+run_php_in_stage repair-scoped-composer-autoload.php
+
 echo "==> Collect third-party licenses"
 run_php_in_stage collect-licenses.php
 
@@ -186,13 +189,28 @@ bash "${ROOT}/build/verify-scoped-build.sh" "${CORE_ZIP}"
 
 if [[ -d "${PRO_ROOT}" ]]; then
 	echo "==> Packaging ${PRO_SLUG}-${VERSION}.zip"
+	# vendor/ mixes composer's dev-only install (PHPUnit, php-scoper, etc. —
+	# excluded below) with the manually-vendored Freemius SDK at
+	# vendor/freemius/, which IS runtime-required and must ship. The
+	# include rules must precede the vendor exclude for rsync's
+	# first-match-wins filter order to keep just that one subdirectory.
+	# docs/ and the plugin-root README.md are internal engineering
+	# documentation (architecture notes, Freemius secret-handling
+	# procedures) — never customer/runtime content. readme.txt is the
+	# real customer/package metadata file Freemius (and WordPress) parse,
+	# and is NOT excluded here, so it ships normally.
 	rsync -a \
 		--exclude='.git' \
 		--exclude='.gitignore' \
 		--exclude='.phpunit.cache' \
 		--exclude='dist' \
 		--exclude='tests' \
-		--exclude='vendor' \
+		--exclude='/docs' \
+		--exclude='/README.md' \
+		--include='vendor/' \
+		--include='vendor/freemius/' \
+		--include='vendor/freemius/**' \
+		--exclude='vendor/*' \
 		--exclude='composer.json' \
 		--exclude='composer.lock' \
 		--exclude='phpunit.xml.dist' \

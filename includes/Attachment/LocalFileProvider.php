@@ -12,6 +12,8 @@ namespace Kazcode\WpStorage\Attachment;
 defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Domain\LocalStoragePolicy;
+use Kazcode\WpStorage\Services\ProfileAwareObjectOperations;
 use Kazcode\WpStorage\Storage\PathGuard;
 use Kazcode\WpStorage\Storage\S3Storage;
 
@@ -23,11 +25,18 @@ final class LocalFileProvider {
 	private Settings $settings;
 	private S3Storage $storage;
 	private AttachmentFileResolver $files;
+	private ProfileAwareObjectOperations $profile_ops;
+	/** @var array<int, true> */
+	private array $rest_media_edit_attachment_ids = array();
+	private bool $rest_media_edit_all = false;
+	/** @var array<string, true> */
+	private array $rest_materialized_paths = array();
 
-	public function __construct(Settings $settings, S3Storage $storage) {
-		$this->settings = $settings;
-		$this->storage  = $storage;
-		$this->files    = new AttachmentFileResolver($storage->keys());
+	public function __construct(Settings $settings, S3Storage $storage, ?ProfileAwareObjectOperations $profile_ops = null) {
+		$this->settings    = $settings;
+		$this->storage     = $storage;
+		$this->files       = new AttachmentFileResolver($storage->keys());
+		$this->profile_ops = $profile_ops ?? new ProfileAwareObjectOperations( legacy: $storage, settings: $settings );
 	}
 
 	/**
@@ -37,6 +46,9 @@ final class LocalFileProvider {
 		add_filter('wp_get_original_image_path', array($this, 'filter_original_image_path'), 10, 2);
 		add_filter('get_attached_file', array($this, 'filter_get_attached_file'), 10, 2);
 		add_action('wp_ajax_image-editor', array($this, 'ensure_before_image_editor'), 1);
+		add_filter('rest_request_before_callbacks', array($this, 'filter_rest_request_before_callbacks'), 10, 3);
+		add_filter('rest_request_after_callbacks', array($this, 'filter_rest_request_after_callbacks'), 10, 3);
+		add_action('shutdown', array($this, 'cleanup_rest_materialized_files'), 0);
 	}
 
 	/**
@@ -54,7 +66,7 @@ final class LocalFileProvider {
 			return $file;
 		}
 		try {
-			$this->ensure_local($attachment_id, true);
+			$this->record_rest_materialization($attachment_id, $this->ensure_local($attachment_id, true));
 		} catch (\Throwable $e) {
 			return $file;
 		}
@@ -73,7 +85,7 @@ final class LocalFileProvider {
 			return $path;
 		}
 		try {
-			$this->ensure_local($attachment_id, true);
+			$this->record_rest_materialization($attachment_id, $this->ensure_local($attachment_id, true));
 		} catch (\Throwable $e) {
 			return $path;
 		}
@@ -111,6 +123,53 @@ final class LocalFileProvider {
 		} catch (\Throwable $e) {
 			// Image editor will surface its own error.
 		}
+	}
+
+	/**
+	 * Permit on-demand files only for authorized REST media editor reads.
+	 *
+	 * @param mixed $response REST response/error.
+	 * @param mixed $handler  Matched handler.
+	 * @param mixed $request  REST request.
+	 * @return mixed
+	 */
+	public function filter_rest_request_before_callbacks($response, $handler, $request) {
+		$this->reset_rest_materialization_context();
+
+		if (!$this->is_rest_media_edit_request($request)) {
+			return $response;
+		}
+
+		$route = method_exists($request, 'get_route') ? (string) $request->get_route() : '';
+		$route = '/' . trim($route, '/');
+
+		if (preg_match('#^/wp/v2/media/(\d+)$#', $route, $matches)) {
+			$attachment_id = (int) $matches[1];
+			if ($attachment_id > 0 && current_user_can('edit_post', $attachment_id)) {
+				$this->rest_media_edit_attachment_ids[$attachment_id] = true;
+			}
+			return $response;
+		}
+
+		if ($route === '/wp/v2/media' && current_user_can('upload_files')) {
+			$this->rest_media_edit_all = true;
+		}
+
+		return $response;
+	}
+
+	/**
+	 * Clean up temporary REST editor materialization after WordPress has built the response.
+	 *
+	 * @param mixed $response REST response/error.
+	 * @param mixed $handler  Matched handler.
+	 * @param mixed $request  REST request.
+	 * @return mixed
+	 */
+	public function filter_rest_request_after_callbacks($response, $handler, $request) {
+		$this->cleanup_rest_materialized_files();
+		$this->reset_rest_materialization_context();
+		return $response;
 	}
 
 	/**
@@ -172,11 +231,14 @@ final class LocalFileProvider {
 			if (is_file($absolute)) {
 				continue;
 			}
-			$head = $this->storage->head_relative($relative);
+			$head = $this->profile_ops->head_attachment_relative($attachment_id, $relative);
 			if (empty($head['exists'])) {
 				continue;
 			}
-			$this->storage->download_relative($relative, $absolute);
+			$download = $this->profile_ops->download_attachment_relative_to_local($attachment_id, $relative, $absolute);
+			if (empty($download['success'])) {
+				continue;
+			}
 			$downloaded[] = $relative;
 		}
 
@@ -190,6 +252,9 @@ final class LocalFileProvider {
 		if (!$this->is_offloaded($attachment_id)) {
 			return false;
 		}
+		if ($this->is_rest_media_edit_materialization_allowed($attachment_id)) {
+			return true;
+		}
 		if (defined('WP_CLI') && WP_CLI) {
 			return true;
 		}
@@ -200,6 +265,69 @@ final class LocalFileProvider {
 			return false;
 		}
 		return current_user_can('upload_files');
+	}
+
+	/**
+	 * @param list<string> $relatives
+	 */
+	private function record_rest_materialization(int $attachment_id, array $relatives): void {
+		if (!$this->is_rest_media_edit_materialization_allowed($attachment_id)) {
+			return;
+		}
+		foreach ($relatives as $relative) {
+			$absolute = PathGuard::absolute_under_uploads($relative);
+			if ($absolute !== null) {
+				$this->rest_materialized_paths[$absolute] = true;
+			}
+		}
+	}
+
+	public function cleanup_rest_materialized_files(): void {
+		if ($this->rest_materialized_paths === array()) {
+			return;
+		}
+		if ($this->settings->local_storage_policy() !== LocalStoragePolicy::REMOTE_ONLY) {
+			$this->rest_materialized_paths = array();
+			return;
+		}
+		foreach (array_keys($this->rest_materialized_paths) as $path) {
+			if (is_file($path)) {
+				wp_delete_file($path);
+			}
+		}
+		$this->rest_materialized_paths = array();
+	}
+
+	private function is_rest_media_edit_materialization_allowed(int $attachment_id): bool {
+		if ($this->rest_media_edit_all) {
+			return true;
+		}
+		return $attachment_id > 0 && isset($this->rest_media_edit_attachment_ids[$attachment_id]);
+	}
+
+	private function reset_rest_materialization_context(): void {
+		$this->rest_media_edit_attachment_ids = array();
+		$this->rest_media_edit_all            = false;
+	}
+
+	private function is_rest_media_edit_request($request): bool {
+		if (!is_object($request) || !method_exists($request, 'get_route') || !method_exists($request, 'get_param')) {
+			return false;
+		}
+
+		if (method_exists($request, 'get_method')) {
+			$method = strtoupper((string) $request->get_method());
+			if ($method !== 'GET' && $method !== 'HEAD') {
+				return false;
+			}
+		}
+
+		if ((string) $request->get_param('context') !== 'edit') {
+			return false;
+		}
+
+		$route = '/' . trim((string) $request->get_route(), '/');
+		return $route === '/wp/v2/media' || (bool) preg_match('#^/wp/v2/media/\d+$#', $route);
 	}
 
 	/**

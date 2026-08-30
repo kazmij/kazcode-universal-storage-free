@@ -14,6 +14,8 @@ defined( 'ABSPATH' ) || exit;
 use Kazcode\WpStorage\Attachment\AttachmentFileResolver;
 use Kazcode\WpStorage\Domain\ManifestBuilder;
 use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
+use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
+use Kazcode\WpStorage\Infrastructure\AttachmentLock;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\Queue\JobHandlerInterface;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
@@ -74,19 +76,33 @@ final class CleanupLocalFilesJobHandler implements JobHandlerInterface {
 
 		$prefix = isset( $payload['profile_prefix'] ) ? (string) $payload['profile_prefix'] : $this->resolve_prefix( $plugin );
 		$delete = array_key_exists( 'delete_local', $payload ) ? (bool) $payload['delete_local'] : null;
+		$lock   = new AttachmentLock();
+		$lease  = $lock->acquire_lease( $attachment_id, 'cleanup' );
+		if ( ! $lease instanceof AttachmentLeaseHandle ) {
+			return array(
+				'success' => false,
+				'message' => 'Attachment is locked by another operation.',
+			);
+		}
 
-		$result = ( new CleanupLocalFiles( $plugin->settings(), $plugin->storage() ) )->maybe_cleanup(
-			$attachment_id,
-			$local,
-			$manifest->items(),
-			$delete,
-			$prefix !== '' ? $prefix : null
-		);
+		try {
+			$result = ( new CleanupLocalFiles( $plugin->settings(), $plugin->storage() ) )->maybe_cleanup(
+				$attachment_id,
+				$local,
+				$manifest->items(),
+				$delete,
+				$prefix !== '' ? $prefix : null,
+				$lock,
+				$lease
+			);
 
-		return array(
-			'success' => ! $result['skipped'] || $result['deleted'] === 0,
-			'message' => (string) ( $result['message'] ?? '' ),
-		);
+			return array(
+				'success' => ! $result['skipped'] || $result['deleted'] === 0,
+				'message' => (string) ( $result['message'] ?? '' ),
+			);
+		} finally {
+			$lock->release_lease( $lease );
+		}
 	}
 
 	private function resolve_prefix( Plugin $plugin ): string {

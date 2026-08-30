@@ -145,6 +145,39 @@ final class FailedItemsService {
 		return $n;
 	}
 
+	/** @var list<string> This plugin's own bookkeeping postmeta keys — never touches the attachment post, the local file, or the remote object. */
+	private const CLEARABLE_META_KEYS = array(
+		'_s3ms_status',
+		'_s3ms_last_error',
+		'_s3ms_offloaded_at',
+		'_s3ms_verified_at',
+		'_s3ms_original_key',
+		self::META_IGNORED,
+	);
+
+	/**
+	 * Clear this plugin's own failed/offload bookkeeping for the given
+	 * attachments, resetting them to "never processed" from this plugin's
+	 * point of view — a subsequent offload/retry starts from scratch. Never
+	 * deletes the attachment post, the local file, or the remote object.
+	 *
+	 * @param list<int> $ids IDs.
+	 */
+	public function clear( array $ids ): int {
+		$n = 0;
+		foreach ( $ids as $id ) {
+			$id = (int) $id;
+			if ( $id <= 0 ) {
+				continue;
+			}
+			foreach ( self::CLEARABLE_META_KEYS as $meta_key ) {
+				delete_post_meta( $id, $meta_key );
+			}
+			++$n;
+		}
+		return $n;
+	}
+
 	/**
 	 * CSV export string.
 	 *

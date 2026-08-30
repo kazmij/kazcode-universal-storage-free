@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -103,6 +103,15 @@ Release builds use Composer and PHP-Scoper (third-party dependencies are namespa
 
 == Changelog ==
 
+= 1.0.1 =
+* Strengthened remote verification before local media cleanup.
+* Improved recovery behavior during transient storage-provider failures.
+* Hardened shared-media and multi-profile object handling.
+* Fixed remote-only media compatibility with WordPress editor and REST workflows.
+* Improved restore and partial-failure safety.
+* Hardened concurrent attachment operations against stale workers.
+* Improved Composer and AWS SDK dependency isolation for compatibility with other plugins and Composer-based WordPress installations.
+
 = 1.0.0 =
 * First public release
 * Object inventory (`s3ms_objects`), storage profiles, derived attachment status, queue jobs
@@ -113,6 +122,9 @@ Release builds use Composer and PHP-Scoper (third-party dependencies are namespa
 * PHP-Scoper release builds (`Kazcode\WpStorage\Vendor` prefix)
 
 == Upgrade Notice ==
+
+= 1.0.1 =
+Reliability, data-integrity, and compatibility hotfix. Update recommended for all sites.
 
 = 1.0.0 =
 First public release. Requires PHP 8.3+.

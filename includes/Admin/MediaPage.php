@@ -79,7 +79,9 @@ final class MediaPage {
 						<a class="button" href="#" id="s3ms-failed-export"><?php esc_html_e( 'Export CSV', 'kazcode-universal-storage' ); ?></a>
 						<button type="button" class="button" id="s3ms-failed-ignore-selected"><?php esc_html_e( 'Ignore selected', 'kazcode-universal-storage' ); ?></button>
 						<button type="button" class="button" id="s3ms-failed-unignore-selected"><?php esc_html_e( 'Unignore selected', 'kazcode-universal-storage' ); ?></button>
+						<button type="button" class="button" id="s3ms-failed-clear-selected"><?php esc_html_e( 'Clear selected', 'kazcode-universal-storage' ); ?></button>
 					</p>
+					<p class="description"><?php esc_html_e( 'Clear removes this plugin\'s own failure/status tracking for the selected items only — it never deletes the media file or attachment, and a future offload/retry starts fresh.', 'kazcode-universal-storage' ); ?></p>
 					<table class="widefat striped s3ms-table" id="s3ms-failed-table">
 						<thead>
 							<tr>

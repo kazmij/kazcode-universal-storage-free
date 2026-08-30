@@ -14,6 +14,7 @@ use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\ManifestBuilder;
 use Kazcode\WpStorage\Domain\MediaManifest;
 use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
+use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Domain\StorageProfile;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
@@ -143,6 +144,46 @@ final class AdoptAttachmentServiceTest extends TestCase {
 		$this->assertSame( 0, $result['missing'] );
 		$this->assertSame( 1, $result['errors'] );
 		$this->assertSame( 'Connection timed out.', $result['results'][0]['error'] );
+	}
+
+	/**
+	 * @dataProvider uncertain_head_provider
+	 */
+	public function test_uncertain_head_results_do_not_record_missing_rows(string $error, string $error_class): void {
+		WpStubs::$posts[13] = (object) array(
+			'ID'        => 13,
+			'post_type' => 'attachment',
+		);
+
+		$gateway = $this->createMock( ProfileStorageGateway::class );
+		$gateway->method( 'head_key' )->willReturn(
+			array(
+				'exists'            => false,
+				'confirmed_missing' => false,
+				'error'             => $error,
+				'error_class'       => $error_class,
+			)
+		);
+
+		$objects = $this->createMock( ObjectRepository::class );
+		$objects->expects( $this->never() )->method( 'upsert' );
+		$objects->method( 'find_by_attachment' )->willReturn( array() );
+
+		$result = $this->service( $gateway, $objects )->adopt( 13, 1, false );
+
+		$this->assertFalse( $result['success'] );
+		$this->assertSame( 0, $result['missing'] );
+		$this->assertSame( 1, $result['errors'] );
+	}
+
+	/**
+	 * @return iterable<string, array{string,string}>
+	 */
+	public static function uncertain_head_provider(): iterable {
+		yield '403' => array( 'Access Denied', RemoteObservation::ERROR_AUTH );
+		yield '429' => array( 'Too Many Requests', RemoteObservation::ERROR_THROTTLED );
+		yield '503' => array( 'Service Unavailable', RemoteObservation::ERROR_PROVIDER );
+		yield 'timeout' => array( 'Connection timed out.', RemoteObservation::ERROR_TIMEOUT );
 	}
 
 	private function service( ProfileStorageGateway $gateway, ObjectRepository $objects ): AdoptAttachmentService {

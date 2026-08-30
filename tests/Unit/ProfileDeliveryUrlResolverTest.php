@@ -26,6 +26,7 @@ final class ProfileDeliveryUrlResolverTest extends TestCase {
 					'storage_profile_id'  => 2,
 					'local_relative_path' => '2026/08/photo.jpg',
 					'object_key'          => 'uploads/2026/08/photo.jpg',
+					'remote_status'       => 'present',
 				),
 			)
 		);
@@ -140,5 +141,30 @@ final class ProfileDeliveryUrlResolverTest extends TestCase {
 			->url_for_attachment_relative( 1, '2026/08/photo.jpg' );
 
 		$this->assertSame( 'https://live.example/2026/08/photo.jpg', $url );
+	}
+
+	public function test_missing_inventory_profile_does_not_fallback_to_live_settings(): void {
+		$objects = $this->createMock( ObjectRepository::class );
+		$objects->method( 'find_by_attachment' )->willReturn(
+			array(
+				array(
+					'storage_profile_id'  => 55,
+					'local_relative_path' => '2026/08/photo.jpg',
+					'object_key'          => 'gone-profile/2026/08/photo.jpg',
+					'remote_status'       => 'present',
+				),
+			)
+		);
+
+		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
+		$profiles->method( 'find' )->with( 55 )->willReturn( null );
+
+		$fallback = $this->createMock( PublicUrlResolver::class );
+		$fallback->expects( $this->never() )->method( 'url_for_relative' );
+
+		$url = ( new ProfileDeliveryUrlResolver( $objects, $profiles, $fallback ) )
+			->url_for_attachment_relative( 1, '2026/08/photo.jpg' );
+
+		$this->assertSame( '', $url );
 	}
 }

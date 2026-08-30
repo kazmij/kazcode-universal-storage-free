@@ -14,6 +14,7 @@ defined( 'ABSPATH' ) || exit;
 use Aws\S3\MultipartUploader;
 use Aws\Exception\MultipartUploadException;
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Domain\RemoteObservation;
 
 /**
  * Put / Head / Delete wrappers. ACL is never set (bucket-owner-enforced friendly).
@@ -140,7 +141,7 @@ final class S3Storage {
 	 * HEAD object by relative path.
 	 *
 	 * @param string $relative Relative uploads path.
-	 * @return array{exists:bool,content_length?:int,content_type?:string}
+	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,error_class?:string,remote_status?:string,verification_level?:string,content_length?:int,content_type?:string}
 	 */
 	public function head_relative(string $relative): array {
 		return $this->head_key($this->keys->resolve($relative));
@@ -156,7 +157,7 @@ final class S3Storage {
 	 * object as remotely missing, or a transient error gets written as data loss.
 	 *
 	 * @param string $key S3 key.
-	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,content_length?:int,content_type?:string}
+	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,error_class?:string,remote_status?:string,verification_level?:string,content_length?:int,content_type?:string}
 	 */
 	public function head_key(string $key): array {
 		try {
@@ -167,20 +168,26 @@ final class S3Storage {
 				)
 			);
 			return array(
-				'exists'          => true,
-				'content_length'  => (int) $result->get('ContentLength'),
-				'content_type'    => (string) $result->get('ContentType'),
+				'exists'             => true,
+				'remote_status'      => RemoteObservation::REMOTE_PRESENT,
+				'verification_level' => RemoteObservation::EXISTS_VERIFIED,
+				'content_length'     => (int) $result->get('ContentLength'),
+				'content_type'       => (string) $result->get('ContentType'),
 			);
 		} catch (\Throwable $e) {
 			$confirmed_missing = $this->is_missing_object_error($e);
+			$error_class       = $confirmed_missing ? '' : RemoteObservation::classify_exception($e);
 			if (!$confirmed_missing && defined('WP_DEBUG') && WP_DEBUG) {
 				// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				error_log('KAZCODE Universal Storage head_key transient error for key ' . $key . ': ' . $e->getMessage());
+				error_log('KAZCODE Universal Storage head_key transient error for key ' . $key . ' (' . $error_class . ')');
 			}
 			return array(
-				'exists'            => false,
-				'confirmed_missing' => $confirmed_missing,
-				'error'             => $confirmed_missing ? '' : $e->getMessage(),
+				'exists'             => false,
+				'confirmed_missing'  => $confirmed_missing,
+				'remote_status'      => $confirmed_missing ? RemoteObservation::REMOTE_CONFIRMED_MISSING : RemoteObservation::REMOTE_UNKNOWN,
+				'verification_level' => RemoteObservation::NOT_VERIFIED,
+				'error_class'        => $error_class,
+				'error'              => $confirmed_missing ? '' : $e->getMessage(),
 			);
 		}
 	}
@@ -264,7 +271,7 @@ final class S3Storage {
 		}
 
 		try {
-			$this->client()->deleteObjects(
+			$result = $this->client()->deleteObjects(
 				array(
 					'Bucket' => $this->bucket(),
 					'Delete' => array(
@@ -273,14 +280,39 @@ final class S3Storage {
 					),
 				)
 			);
+			$errors = $this->delete_errors_from_result( $result );
+			if ( $errors !== array() ) {
+				throw new \RuntimeException( 'Batch delete partial failure for ' . count( $errors ) . ' object(s).' );
+			}
 			return true;
 		} catch (\Throwable $e) {
+			if ( str_starts_with( $e->getMessage(), 'Batch delete partial failure' ) ) {
+				throw $e;
+			}
 			if ($this->should_fallback_to_single_delete($e)) {
 				return false;
 			}
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- callers catch \Throwable generically and never echo the raw message as HTML; message itself is a static string with no interpolation.
 			throw new \RuntimeException('Batch delete failed.', 0, $e);
 		}
+	}
+
+	/**
+	 * @return list<array<string, mixed>>
+	 */
+	private function delete_errors_from_result( mixed $result ): array {
+		$errors = null;
+		if ( is_array( $result ) ) {
+			$errors = $result['Errors'] ?? null;
+		} elseif ( is_object( $result ) ) {
+			if ( method_exists( $result, 'get' ) ) {
+				$errors = $result->get( 'Errors' );
+			} elseif ( isset( $result->Errors ) ) {
+				$errors = $result->Errors;
+			}
+		}
+
+		return is_array( $errors ) ? array_values( $errors ) : array();
 	}
 
 	private function should_fallback_to_single_delete(\Throwable $e): bool {

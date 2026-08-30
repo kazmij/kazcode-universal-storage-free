@@ -158,11 +158,16 @@ final class AdminLayout {
 			return;
 		}
 		?>
-		<div class="kazus-pro-banner"
-			data-s3ms-tour-step="6"
-			data-s3ms-tour-title="<?php esc_attr_e( 'Go further with Pro', 'kazcode-universal-storage' ); ?>"
-			data-s3ms-tour-text="<?php esc_attr_e( 'Multiple storage profiles, cross-provider migration, orphan scan, advanced health, and multisite network defaults are part of KAZCODE Universal Storage Pro.', 'kazcode-universal-storage' ); ?>"
-		>
+		<div class="kazus-pro-banner">
+			<?php
+			// This banner is deliberately NOT a tour step (no data-s3ms-tour-*
+			// attributes) — it's a persistent marketing banner, not tutorial
+			// content. It previously hardcoded data-s3ms-tour-step="6", which
+			// silently outranked whatever step number the page's own
+			// tour_replay_button() was given (always meant to be the true
+			// final step — see its docblock), making the tour end on this
+			// banner instead of closing cleanly. See tests/CHARACTERIZATION.md.
+			?>
 			<div class="kazus-pro-banner__text">
 				<strong><?php esc_html_e( "You're on the Free plan", 'kazcode-universal-storage' ); ?></strong>
 				<p><?php esc_html_e( 'Upgrade to Pro for multiple storage destinations, cross-provider migration, orphan scan, advanced health checks, and multisite network defaults.', 'kazcode-universal-storage' ); ?></p>

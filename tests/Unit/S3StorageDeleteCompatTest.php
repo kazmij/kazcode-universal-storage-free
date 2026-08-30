@@ -58,7 +58,6 @@ final class S3StorageDeleteCompatTest extends TestCase {
 
 		$ref = new \ReflectionClass( $storage );
 		$prop = $ref->getProperty( 'client' );
-		$prop->setAccessible( true );
 		$prop->setValue( $storage, $client );
 
 		$storage->delete_keys( array( 'uploads/a.jpg' ) );
@@ -67,6 +66,53 @@ final class S3StorageDeleteCompatTest extends TestCase {
 		$this->assertSame( 1, $client->single_calls );
 		$this->assertSame( 'test-bucket', $client->last_single_args['Bucket'] ?? '' );
 		$this->assertSame( 'uploads/a.jpg', $client->last_single_args['Key'] ?? '' );
+	}
+
+	public function test_batch_delete_partial_errors_are_not_treated_as_success(): void {
+		$settings = $this->createMock( Settings::class );
+		$settings->method( 'get' )->willReturnCallback(
+			static fn( string $key, mixed $default = null ): mixed => match ( $key ) {
+				'bucket' => 'test-bucket',
+				default => $default,
+			}
+		);
+
+		$client = new class() {
+			public int $batch_calls = 0;
+
+			public function deleteObjects( array $args ): array {
+				++$this->batch_calls;
+				return array(
+					'Deleted' => array(
+						array( 'Key' => 'uploads/a.jpg' ),
+						array( 'Key' => 'uploads/b.jpg' ),
+					),
+					'Errors'  => array(
+						array(
+							'Key'     => 'uploads/c.jpg',
+							'Code'    => 'AccessDenied',
+							'Message' => 'Access Denied',
+						),
+					),
+				);
+			}
+		};
+
+		$storage = new S3Storage(
+			$this->createMock( S3ClientFactory::class ),
+			new S3KeyResolver( $settings ),
+			new PublicUrlResolver( $settings ),
+			$settings
+		);
+
+		$ref  = new \ReflectionClass( $storage );
+		$prop = $ref->getProperty( 'client' );
+		$prop->setValue( $storage, $client );
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'Batch delete partial failure' );
+
+		$storage->delete_keys( array( 'uploads/a.jpg', 'uploads/b.jpg', 'uploads/c.jpg' ) );
 	}
 
 	public function test_delete_key_is_idempotent_for_missing_object(): void {
@@ -93,7 +139,6 @@ final class S3StorageDeleteCompatTest extends TestCase {
 
 		$ref = new \ReflectionClass( $storage );
 		$prop = $ref->getProperty( 'client' );
-		$prop->setAccessible( true );
 		$prop->setValue( $storage, $client );
 
 		$storage->delete_key( 'uploads/missing.jpg' );

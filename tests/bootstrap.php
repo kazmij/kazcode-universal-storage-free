@@ -53,18 +53,27 @@ if (!function_exists('sanitize_key')) {
 	}
 }
 if (!function_exists('apply_filters')) {
-	/** @var array<string, list<callable>> */
+	/** @var array<string, list<array{callback: callable, accepted_args: int}>> */
 	$GLOBALS['s3ms_test_filters'] = array();
 	function apply_filters($hook_name, $value, ...$args) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
-		foreach ($GLOBALS['s3ms_test_filters'][ (string) $hook_name ] ?? array() as $callback) {
-			$value = $callback($value, ...$args);
+		foreach ($GLOBALS['s3ms_test_filters'][ (string) $hook_name ] ?? array() as $entry) {
+			// Real WordPress truncates to $accepted_args — a callback declaring
+			// fewer params than a hook actually fires with is a real, easy
+			// mistake (e.g. forgetting accepted_args=2 on add_action() after
+			// widening a closure's signature) that must fail the same way here
+			// as it would in production, not silently receive extra args.
+			$all = array($value, ...$args);
+			$value = ($entry['callback'])(...array_slice($all, 0, max(1, $entry['accepted_args'])));
 		}
 		return $value;
 	}
 }
 if (!function_exists('add_filter')) {
 	function add_filter($hook_name, $callback, $priority = 10, $accepted_args = 1) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
-		$GLOBALS['s3ms_test_filters'][ (string) $hook_name ][] = $callback;
+		$GLOBALS['s3ms_test_filters'][ (string) $hook_name ][] = array(
+			'callback'      => $callback,
+			'accepted_args' => $accepted_args,
+		);
 	}
 }
 if (!function_exists('remove_all_filters')) {
@@ -82,8 +91,8 @@ if (!function_exists('add_action')) {
 }
 if (!function_exists('do_action')) {
 	function do_action($hook_name, ...$args) {
-		foreach ($GLOBALS['s3ms_test_filters'][ (string) $hook_name ] ?? array() as $callback) {
-			$callback(...$args);
+		foreach ($GLOBALS['s3ms_test_filters'][ (string) $hook_name ] ?? array() as $entry) {
+			($entry['callback'])(...array_slice($args, 0, $entry['accepted_args']));
 		}
 	}
 }
@@ -115,6 +124,35 @@ if (!function_exists('get_post')) {
 	function get_post($post) {
 		$id = is_object($post) ? (int) $post->ID : (int) $post;
 		return WpStubs::$posts[ $id ] ?? null;
+	}
+}
+if (!function_exists('get_posts')) {
+	function get_posts($args = array()) {
+		$args = is_array($args) ? $args : array();
+		$ids  = array();
+		foreach (WpStubs::$posts as $id => $post) {
+			$post_type = isset($post->post_type) ? (string) $post->post_type : 'attachment';
+			if (!empty($args['post_type']) && (string) $args['post_type'] !== $post_type) {
+				continue;
+			}
+			if (!empty($args['post__not_in']) && in_array((int) $id, array_map('intval', (array) $args['post__not_in']), true)) {
+				continue;
+			}
+			if (isset($args['meta_key'])) {
+				$value = WpStubs::$post_meta[ (int) $id ][ (string) $args['meta_key'] ] ?? '';
+				if (array_key_exists('meta_value', $args) && $value !== $args['meta_value']) {
+					continue;
+				}
+			}
+			$ids[] = (int) $id;
+			if (!empty($args['numberposts']) && count($ids) >= (int) $args['numberposts']) {
+				break;
+			}
+		}
+		if (($args['fields'] ?? '') === 'ids') {
+			return $ids;
+		}
+		return array_map(static fn(int $id): object => WpStubs::$posts[$id], $ids);
 	}
 }
 if (!function_exists('get_post_meta')) {
@@ -182,6 +220,28 @@ if (!function_exists('delete_option')) {
 	function delete_option($option) {
 		unset(WpStubs::$options[ (string) $option ]);
 		return true;
+	}
+}
+if (!function_exists('get_current_user_id')) {
+	function get_current_user_id() {
+		return WpStubs::$current_user_id;
+	}
+}
+if (!function_exists('wp_get_current_user')) {
+	function wp_get_current_user() {
+		$user             = new \stdClass();
+		$user->user_login = WpStubs::$current_user_login;
+		return $user;
+	}
+}
+if (!function_exists('current_user_can')) {
+	function current_user_can($capability, ...$args) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		return ! empty(WpStubs::$current_user_caps[ (string) $capability ]);
+	}
+}
+if (!function_exists('wp_doing_cron')) {
+	function wp_doing_cron() {
+		return false;
 	}
 }
 if (!function_exists('wp_upload_dir')) {

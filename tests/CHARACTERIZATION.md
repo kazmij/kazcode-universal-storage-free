@@ -10,7 +10,7 @@ Evidence tag: **CONFIRMED** = covered by unit characterization tests or source a
 | Site | Behavior |
 |------|----------|
 | `AttachmentOffloader::delete_local_files` | `wp_delete_file` only if `realpath` under uploads `basedir` |
-| `AttachmentRestorer::on_delete_attachment` | `S3Storage::delete_relatives` from `AttachmentFileResolver::relative_paths` when status or `_s3ms_original_key` set |
+| `AttachmentRestorer::on_delete_attachment` | Acquires the per-attachment lock, asks `RemoteDeleteSafetyGuard`, then deletes only `ProfileObjectLocation` entries through `ProfileAwareObjectOperations`; ambiguous/shared/missing-profile states skip remote delete and log `remote_delete_skipped` |
 | `S3Storage::delete_keys` | Explicit key list; chunks of 1000; **never** recursive prefix delete; falls back to per-key `DeleteObject` when batch fails (MinIO) |
 | `ConnectionTestService::run` | Temp file `@unlink` + delete probe object key |
 
@@ -22,11 +22,22 @@ Evidence tag: **CONFIRMED** = covered by unit characterization tests or source a
 | `local_storage_policy=keep_originals` | After verify, delete size variants only; original kept locally | `…::test_keep_originals_deletes_size_variants_only`, `CleanupLocalFilesTest::test_keep_originals_deletes_only_sizes` |
 | `local_storage_policy=remote_only`, verify Head fails | Stay `offloaded`; set `_s3ms_last_error`; **keep** local | `…::test_verify_before_delete_true_skips_local_delete_when_head_fails`, `CleanupLocalFilesTest::test_verify_failure_skips_delete` |
 | Verify before local delete | **Always required** (P5-T03); no opt-out toggle | `CleanupLocalFiles::maybe_cleanup` |
+| Verification level before local delete | Local delete requires `SIZE_VERIFIED` when local size is known: HEAD must prove the key exists and `Content-Length == filesize(local)`. `EXISTS_VERIFIED` alone is not sufficient for destructive cleanup. | `CleanupLocalFilesTest::test_remote_only_skips_delete_when_remote_size_mismatches_local_file` |
+
+## Remote observation semantics
+
+| Observation | Meaning | Persistence rule |
+|----------|----------|------|
+| `REMOTE_PRESENT` | Provider confirmed the key exists. With expected size, this becomes `SIZE_VERIFIED` only when `Content-Length` matches. | May update `verified_at` only when the operation's required verification level is satisfied. |
+| `REMOTE_CONFIRMED_MISSING` | Provider returned definitive not-found semantics, such as 404/NoSuchKey/NotFound. | May be reported as missing where the caller is allowed to record absence. |
+| `REMOTE_UNKNOWN` / `REMOTE_ERROR` | Auth failure, throttling, timeout, network/TLS/DNS/provider error, or unresolved profile/object location. | Must not be persisted as remote missing or data loss; destructive local delete and remote cleanup fail closed. |
+
+`EXISTS_VERIFIED` and `SIZE_VERIFIED` are not byte-for-byte content verification. `CONTENT_VERIFIED` is reserved for a future checksum/deep verification design. KAZCODE does not treat S3-compatible ETag values as universal MD5 content hashes because multipart uploads, encryption, and provider implementations change ETag semantics.
 
 ## Delete attachment keys (P0-T04)
 
-Remote delete inventory = current metadata paths + **current** `object_prefix` via `S3KeyResolver`.  
-`_s3ms_original_key` is a presence gate / UI value, **not** the full key list.
+Remote delete inventory = the resolved `s3ms_objects.storage_profile_id + object_key` for every current manifest path.
+`_s3ms_original_key` is a presence gate / UI value, **not** the physical delete authority.
 
 Test: `DeleteAttachmentCharacterizationTest`.
 
@@ -89,6 +100,7 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 | Orphan scan | LIST prefix page vs known `object_key` inventory; **dry-run only** | `OrphanScanServiceTest` |
 | CleanupLocalFiles job | Runs only when all object rows `present` + `verified_at` | `CleanupLocalFilesJobHandler` |
 | HEAD confirmed-missing vs transient error | `S3Storage`/`ProfileStorageGateway::head_key()` set `confirmed_missing=true` only for 404/NoSuchKey/NotFound; any other HEAD failure (network, throttling, auth) returns `exists=false, confirmed_missing=false, error=...` and must **not** be persisted as `remote_status=missing` by callers that write inventory state (fixed bug — see Adopt below) | `HeadKeyConfirmedMissingTest` |
+| Remote-only REST media editor reads | Authenticated `GET /wp-json/wp/v2/media/<id>?context=edit` may trigger WordPress 7.1 `wp_get_missing_image_subsizes()` and `wp_getimagesize()` against `original_image`; KAZCODE permits narrow per-attachment materialization only for authorized media edit REST requests, uses profile-aware reads, and removes files materialized during that REST response again when policy is `REMOTE_ONLY` | `RemoteOnlyRestMaterializationTest`, `tests/eval-file/test-remote-only-rest-context-edit.php` |
 
 ## Storage profile migration (Phase 7)
 
@@ -101,6 +113,7 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 | Crash / tick lease | Background tick lease prevents overlapping cron batches | `BackgroundMigrator::TICK_LEASE_KEY`, characterization test |
 | Cross-provider credentials | A profile can hold its own encrypted access key/secret (`ProfileCredentialStore`) instead of the site-wide Settings secret — required since e.g. AWS and R2 profiles need different keys; without this, `ProfileS3ClientFactory` always used Settings' single secret for every profile, so a real cross-provider migration authenticated with the wrong provider's credentials | `ProfileCredentialStoreTest`, `StorageProfileAdminServiceTest::test_create_with_custom_credentials_stores_them_off_the_legacy_ref` et al.; live-verified against real AWS S3 + Cloudflare R2 test buckets (dry-run, real stream migration, `--delete-source` via async queue, independent SDK verification on both sides) |
 | Delivery URL after migration | Resolver prefers the non-stale row for a relative path, so the destination profile's URL is served immediately after a successful migration, not the pre-migration (now-stale) one | `ProfileDeliveryUrlResolverTest::test_prefers_present_row_over_stale_row_after_migration`; live-verified |
+| Existing object profile affinity | Existing remote objects are always addressed through their persisted Storage Profile binding (`s3ms_objects.storage_profile_id` + `object_key`), never through whatever profile happens to be the current upload target. This covers public delivery, signed URLs, restore, local materialization, verify, repair, and remote delete safety. Legacy/global fallback is explicit and only for non-destructive no-inventory compatibility reads. | `ProfileObjectLocatorTest`, `ProfileAwareObjectOperationsTest`, `ProfileAffinityHotspotTest`, `RepairObjectServiceTest::test_repair_uses_inventory_profile_not_current_default_storage`, `DeleteAttachmentCharacterizationTest::test_delete_uses_guard_approved_physical_keys_not_metadata_relatives` |
 
 ## Adopt existing (Phase 8)
 
@@ -142,11 +155,41 @@ Production / committed `vendor/` may be `--no-dev` (AWS SDK only). Always `compo
 | Health UI | Cached object stats refresh + DB scan via REST | manual / `HealthPage` |
 | Storage wizard | Pro-gated profile migration via REST | `StorageChangeWizardPage` |
 
+## Onboarding tour (admin UX polish)
+
+| Behavior | Expected | Test |
+|----------|----------|------|
+| Tour end state | `tour_replay_button()`'s step is reliably the tour's true last step everywhere — `pro_upsell_banner()` no longer carries a competing `data-s3ms-tour-step`, which previously outranked it on pages showing both (e.g. Dashboard), ending the tour on the marketing banner instead of closing cleanly | Manual: fresh Dashboard load with Pro inactive, walk the tour to the end |
+| Tour close control | A persistent close ("×") on the tooltip, independent of `isLast`/Skip/Finish button wiring | Manual: click × mid-tour, confirm it ends and persists dismissal same as Skip/Finish |
+| Replay-button icon alignment | `.s3ms-tour-launch .button .dashicons` has explicit `width`/`height`/`line-height` so the icon doesn't render visually low next to the label | Manual visual check |
+
+## Failed items clearing
+
+| Behavior | Expected | Test |
+|----------|----------|------|
+| `FailedItemsService::clear()` | Deletes only this plugin's own bookkeeping postmeta (`_s3ms_status`, `_s3ms_last_error`, `_s3ms_offloaded_at`, `_s3ms_verified_at`, `_s3ms_original_key`, `_s3ms_ignored`) for the given attachment IDs — never the attachment post, `_wp_attached_file`, the local file, or the remote object; a subsequent offload/retry starts fresh | `FailedItemsServiceTest` |
+| "Clear selected" bulk action | `POST /kazcode-storage/v1/failed/clear`, same shape/permission as the existing ignore/unignore actions; confirmed via `window.confirm()` before firing; logs a `failed_items_cleared` audit entry | Manual: Media → Failed items → select rows → Clear selected |
+
+## Audit log detail (Free + Pro)
+
+Several call sites previously recorded an event with **empty** context, making the log unable to say what actually changed. Now:
+
+| Action | Context | Test |
+|--------|---------|------|
+| `settings_saved` (Free) | `changed_fields`: list of top-level `s3ms_settings` keys that actually changed, via `Domain\ArrayDiff::changed_keys()` — key names only, never old/new values | `ArrayDiffTest` (the diffing logic; the hook itself isn't separately unit-tested — see `Plugin::boot()`) |
+| `network_settings_saved` (Pro) | Same `changed_fields` shape, same `ArrayDiff` helper | `ArrayDiffTest` (shared logic) |
+| `object_migrated` (Pro) | `object_id`, `source_profile_id`, `dest_profile_id`, `method`, `success`, `message` — real (non-dry-run) migrations only | `MigrateObjectServiceTest::test_stream_migrate_persists_verified_destination_row` |
+| `attachment_migrated` (Pro) | `attachment_id`, `source_profile_id`, `dest_profile_id`, `migrated`, `skipped`, `failed`, `success` — real migrations only | `MigrateAttachmentServiceTest::test_real_migration_records_an_attachment_migrated_audit_log_entry` |
+| `storage_migration_batch` (Pro) | `source_profile_id`, `dest_profile_id`, `processed`, `success`, `failed` — real batches only | `StorageMigrationServiceTest::test_migrate_batch_updates_state_and_cursor` |
+| `default_profile_switched` (Pro) | `dest_profile_id` | `StorageMigrationServiceTest::test_switch_default_profile_sets_default_and_locks_location` |
+| `orphan_scan_page` (Pro) | `profile_id`, `keys_scanned`, `orphans_found`, `complete` — per page, matching the existing non-cumulative `s3ms_orphan_scan_state` semantics | `OrphanScanServiceTest::test_detects_keys_not_in_inventory` |
+| `failed_items_cleared` (Free) | `count`, `ids` (first 20) | manual — see Failed items clearing above |
+
 ## V2 foundation acceptance (post-P11)
 
 | Criterion | Expected | Test |
 |-----------|----------|------|
-| Profile-scoped URLs | Object row profile drives delivery URL, not live Settings | `ProfileDeliveryUrlResolverTest` |
+| Profile-scoped object operations | Object row profile drives delivery URL, signed URL, restore, materialization, verification, repair, and guarded remote delete; live Settings only select the destination for new uploads | `ProfileDeliveryUrlResolverTest`, `ProfileAffinityHotspotTest`, `ProfileAwareObjectOperationsTest` |
 | Restore → local serve | Clear `_s3ms_*` meta + object rows after successful restore | `AttachmentRestorerTest` |
 | Acceptance smoke | §36 infra checks (partial, retry, repair, queue, IA) | `test-v2-acceptance.php` |
 | Superseded variants don't flip status to failed (fixed bug) | `AttachmentSyncDeriver::derive_status()` excludes `stale`/`deleted` object rows from the present/total roll-up, so a fully-offloaded attachment stays `offloaded` after Image Editor crop, Regenerate Thumbnails, or a storage-profile migration leaves the old variant row behind as `stale` — previously it incorrectly derived as `failed`, which broke `AttachmentUrlFilter` URL rewriting for that attachment (Scenario F) | `AttachmentSyncDeriverTest::test_stale_variant_is_excluded_from_roll_up` et al. |

@@ -147,6 +147,29 @@ final class ObjectRepository {
 	}
 
 	/**
+	 * @return list<array<string, mixed>>
+	 */
+	public function find_by_profile_and_key( int $storage_profile_id, string $object_key ): array {
+		global $wpdb;
+		if ( $storage_profile_id <= 0 || $object_key === '' ) {
+			return array();
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock.
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$this->table()} WHERE storage_profile_id = %d AND object_key = %s ORDER BY id ASC", $storage_profile_id, $object_key ), ARRAY_A );
+		return is_array( $rows ) ? $rows : array();
+	}
+
+	public function mark_deleted_by_profile_key_if_stale( int $storage_profile_id, string $object_key ): int {
+		global $wpdb;
+		if ( $storage_profile_id <= 0 || $object_key === '' ) {
+			return 0;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock; source cleanup is allowed to finalize only rows already marked STALE.
+		$updated = $wpdb->query( $wpdb->prepare( "UPDATE {$this->table()} SET remote_status = %s, updated_at = %s WHERE storage_profile_id = %d AND object_key = %s AND remote_status = %s", ObjectRemoteStatus::DELETED, gmdate( 'Y-m-d H:i:s' ), $storage_profile_id, $object_key, ObjectRemoteStatus::STALE ) );
+		return is_int( $updated ) ? $updated : 0;
+	}
+
+	/**
 	 * Paginated object rows for DB-first health scan.
 	 *
 	 * @return list<array<string, mixed>>

@@ -2,15 +2,16 @@
 
 Offload WordPress Media Library binaries to Amazon S3 (or any S3-compatible storage — Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2) while keeping WordPress as the source of truth and the native Media Library UX unchanged.
 
-WordPress keeps attachment posts, metadata, titles, alt text, and `_wp_attached_file` (always a **relative path**, never a URL). Remote storage holds only the binary files — originals and every generated image size. Public URLs are built at render time from your current settings, not stored, so switching a CDN hostname or storage profile never requires touching the database.
+WordPress keeps attachment posts, metadata, titles, alt text, and `_wp_attached_file` (always a **relative path**, never a URL). Remote storage holds only the binary files — originals and every generated image size. Existing remote objects are resolved through the Storage Profile recorded in the object inventory; changing the default upload profile only affects new uploads and does not relocate historical media. Public URLs are built at render time from the owning profile's current delivery/CDN configuration, so changing delivery settings on that profile does not require rewriting attachment paths in the database.
 
 **Full documentation:** [kazcode.net/universal-storage/docs/](https://kazcode.net/universal-storage/docs/) — this README covers the same ground for people already reading the repo.
 
 This repository is the public development source for the **Free** KAZCODE Universal
 Storage WordPress plugin — [product page](https://kazcode.net/universal-storage/). The
 commercial **Pro** add-on is a separate plugin (installed independently, requires Free
-active) and is **not** contained in this repository. WordPress.org listing status: not
-yet submitted as of this writing — do not assume "Approved"/"Official" until that's
+active) and is **not** contained in this repository. WordPress.org listing status:
+submitted and pending review. The plugin is not publicly listed on WordPress.org yet,
+so do not assume "Approved", "Official", or "Available on WordPress.org" until that is
 actually true.
 
 ## Table of contents

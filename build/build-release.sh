@@ -177,6 +177,11 @@ rm -rf "${STAGE}/${CORE_SLUG}/tests" \
 	"${STAGE}/${CORE_SLUG}/test-product-features-local.php"
 find "${STAGE}/${CORE_SLUG}" -maxdepth 1 -name 'docker-compose*.yml' -delete 2>/dev/null || true
 
+# aws-crt-php ships this Python formatter helper in the upstream package, but
+# the WordPress plugin runtime never calls it and WordPress.org does not allow
+# Python application files inside distributed plugin ZIPs.
+rm -f "${STAGE}/${CORE_SLUG}/vendor/aws/aws-crt-php/format-check.py"
+
 echo "==> Packaging ${CORE_SLUG}-${VERSION}.zip"
 (
 	cd "${STAGE}"

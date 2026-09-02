@@ -14,3 +14,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 if ( ! defined( 'KAZUS_VENDOR_SCOPED' ) ) {
 	define( 'KAZUS_VENDOR_SCOPED', true );
 }
+
+foreach (
+	array(
+		'Kazcode\\WpStorage\\Vendor\\Aws\\manifest'     => __DIR__ . '/aws/aws-sdk-php/src/functions.php',
+		'Kazcode\\WpStorage\\Vendor\\JmesPath\\search' => __DIR__ . '/mtdowling/jmespath.php/src/JmesPath.php',
+	) as $function => $file
+) {
+	if ( ! function_exists( $function ) && is_readable( $file ) ) {
+		require_once $file;
+	}
+}

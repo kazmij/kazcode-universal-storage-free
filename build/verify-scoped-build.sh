@@ -77,12 +77,37 @@ if [[ "${AUTOLOAD_RESULT}" != "ok" ]]; then
 	fail "scoped Composer autoload isolation failed: ${AUTOLOAD_RESULT}"
 fi
 
+AUTOLOAD_FILE_COLLISION_CHECK="$(php -r '
+if ( ! defined( "ABSPATH" ) ) {
+	define( "ABSPATH", "/tmp/" );
+}
+$autoloadFiles = require $argv[1] . "/vendor/composer/autoload_files.php";
+foreach ( array_keys( $autoloadFiles ) as $identifier ) {
+	$GLOBALS["__composer_autoload_files"][ $identifier ] = true;
+}
+require $argv[1] . "/vendor/autoload.php";
+require $argv[1] . "/vendor/kazcode-scoped.php";
+if ( ! function_exists( "Kazcode\\WpStorage\\Vendor\\Aws\\manifest" ) ) {
+	fwrite( STDERR, "Kazcode\\WpStorage\\Vendor\\Aws\\manifest is missing when Composer files autoload identifiers collide.\n" );
+	exit( 1 );
+}
+if ( ! function_exists( "Kazcode\\WpStorage\\Vendor\\JmesPath\\search" ) ) {
+	fwrite( STDERR, "Kazcode\\WpStorage\\Vendor\\JmesPath\\search is missing when Composer files autoload identifiers collide.\n" );
+	exit( 1 );
+}
+' "${ROOT}" 2>&1)" || fail "Composer files autoload collision guard failed: ${AUTOLOAD_FILE_COLLISION_CHECK}"
+
 if [[ -d "${ROOT}/tests" ]]; then
 	fail "tests/ must not ship in release ZIP"
 fi
 
 if [[ -d "${ROOT}/vendor/bin" ]]; then
 	fail "vendor/bin must not ship in release ZIP"
+fi
+
+PY_FILES="$(find "${ROOT}" -type f -name '*.py' -print | sed "s#^${ROOT}/##" | sort)"
+if [[ -n "${PY_FILES}" ]]; then
+	fail "Python files must not ship in release ZIP: ${PY_FILES}"
 fi
 
 echo "OK: scoped release ZIP verified — ${ZIP}"

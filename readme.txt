@@ -61,11 +61,13 @@ Full documentation — installation, storage-provider setup, migration, restore,
 
 Use this plugin's WordPress.org support forum first. For direct contact, see https://kazcode.net/universal-storage/support/ or reach KAZCODE at kazmij@gmail.com.
 
-== External services ==
+== External Services ==
 
-KAZCODE Universal Storage connects only to object-storage services explicitly configured by the site administrator. It does not send media, credentials, telemetry, or site data to any KAZCODE-owned service.
+KAZCODE Universal Storage connects only to object-storage services explicitly selected and configured by the site administrator. It does not send media, credentials, telemetry, or site data to any KAZCODE-owned service, and KAZCODE does not proxy your media through its own servers.
 
-The plugin can connect to Amazon S3, Cloudflare R2, DigitalOcean Spaces, Wasabi, Backblaze B2, MinIO, or another administrator-supplied S3-compatible endpoint. Connections occur only when the administrator configures/tests storage, or uses offload, verify, restore, migrate/adopt, or remote-delete functionality.
+The plugin can connect to Amazon S3, Cloudflare R2, DigitalOcean Spaces, Wasabi, Backblaze B2 through its S3-compatible API, MinIO, or another administrator-supplied S3-compatible endpoint. An account with the selected storage provider may be required. Connections occur only when the administrator configures or tests storage, or uses storage operations such as upload/offload, download/restore, HEAD/verification, migration/adoption of existing objects, or remote delete when that behavior is configured.
+
+Media files and storage API requests move directly between this WordPress site and the administrator-selected storage provider. Credentials are used only to authenticate to the configured storage provider and are not sent to KAZCODE servers. Data sent to the configured provider can include media/object binary data, object keys and paths, and metadata or protocol fields required by the S3-compatible API.
 
 Amazon S3 — https://aws.amazon.com/s3/
 Customer Agreement: https://aws.amazon.com/agreement/ — Privacy: https://aws.amazon.com/privacy/

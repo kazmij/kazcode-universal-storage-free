@@ -1,9 +1,8 @@
 # Building the release ZIP
 
-This document describes how `kazcode-universal-storage-$VERSION.zip` is produced.
-For public releases, the source of truth is the main KAZCODE repository's
-immutable release tag. This public repository mirrors the Free plugin source for
-each public release; it is not a competing release source of truth.
+This document describes exactly how `kazcode-universal-storage-$VERSION.zip` — the artifact
+distributed for manual download and submitted to WordPress.org — is produced from this
+repository's source.
 
 The release source of truth is a clean Git release commit/tag. Do not release from a
 working tree that contains source changes not committed in the release tag. SVN is a
@@ -33,8 +32,8 @@ the unscoped dev `vendor/`.
 For public releases, first verify the exact Git tag/commit:
 
 ```bash
-VERSION=1.1.0
-TAG=v1.1.0
+VERSION=1.1.1
+TAG=v1.1.1
 COMMIT="$(git rev-parse HEAD)"
 php build/release-integrity.php preflight --source . --version "$VERSION" --tag "$TAG" --commit "$COMMIT"
 ```
@@ -108,7 +107,7 @@ without tripping its separate rule against bundling application files.
 ## Verifying the scoped build yourself
 
 ```bash
-VERSION=1.1.0
+VERSION=1.1.1
 ZIP="dist/kazcode-universal-storage-${VERSION}.zip"
 unzip -l "$ZIP" | head -30   # inspect contents
 unzip -d /tmp/kazus-check "$ZIP"

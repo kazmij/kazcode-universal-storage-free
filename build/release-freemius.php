@@ -7,6 +7,7 @@ function usage(): void {
 Usage:
   php build/release-freemius.php upload --version VERSION --zip ZIP [--mode pending|beta|released] [--dry-run]
   php build/release-freemius.php status --version VERSION
+  php build/release-freemius.php status --tag-id ID
   php build/release-freemius.php promote --tag-id ID --mode beta|released [--dry-run]
   php build/release-freemius.php download --tag-id ID --output ZIP
 
@@ -65,8 +66,16 @@ function api(string $method, string $path, array $fields = array(), ?string $dow
 	curl_setopt($ch, CURLOPT_HTTPHEADER, array('Authorization: Bearer ' . $token));
 	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 	curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+	if ($download !== null) {
+		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+	}
 	if ($fields !== array()) {
-		curl_setopt($ch, CURLOPT_POSTFIELDS, $fields);
+		if ($method === 'PUT') {
+			curl_setopt($ch, CURLOPT_HTTPHEADER, array('Authorization: Bearer ' . $token, 'Content-Type: application/json'));
+			curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($fields, JSON_THROW_ON_ERROR));
+		} else {
+			curl_setopt($ch, CURLOPT_POSTFIELDS, $fields);
+		}
 	}
 	$data = curl_exec($ch);
 	$code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -142,15 +151,24 @@ try {
 			if ($mode !== 'pending') {
 				$tag_id = extract_tag_id($payload);
 				$payload = api('PUT', '/tags/' . rawurlencode($tag_id) . '.json', array('release_mode' => $mode));
+				if ((string) ($payload['release_mode'] ?? '') !== $mode) {
+					throw new RuntimeException('Freemius promotion response did not match requested release_mode.');
+				}
 			}
 			echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
 			exit(0);
 
 		case 'status':
 			$version = (string) ($opt['version'] ?? '');
-			if ($version === '') {
+			$tag_id = (string) ($opt['tag-id'] ?? '');
+			if ($version === '' && $tag_id === '') {
 				usage();
 				exit(2);
+			}
+			if ($tag_id !== '') {
+				$tag = api('GET', '/tags/' . rawurlencode($tag_id) . '.json');
+				echo json_encode($tag, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+				exit(0);
 			}
 			$payload = api('GET', '/tags.json?count=50');
 			$tag = find_tag_by_version($payload, $version);
@@ -172,6 +190,9 @@ try {
 				exit(0);
 			}
 			$payload = api('PUT', '/tags/' . rawurlencode($tag_id) . '.json', array('release_mode' => $mode));
+			if ((string) ($payload['release_mode'] ?? '') !== $mode) {
+				throw new RuntimeException('Freemius promotion response did not match requested release_mode.');
+			}
 			echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
 			exit(0);
 

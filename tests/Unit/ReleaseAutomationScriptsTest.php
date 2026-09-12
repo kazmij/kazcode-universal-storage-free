@@ -53,6 +53,7 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 	public function test_release_scripts_expose_help(): void {
 		foreach (array(
 			'/build/release-wordpress-org.sh',
+			'/build/release-github-free.sh',
 			'/build/capture-wordpress-screenshots.sh',
 			'/build/deploy-kazcode-site.sh',
 		) as $script) {
@@ -85,6 +86,39 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringContainsString('build/release-freemius.php upload', $makefile);
 		self::assertStringContainsString('--mode "$(MODE)"', $makefile);
 		self::assertStringContainsString('DEXEC_RELEASE', $makefile);
+	}
+
+	public function test_github_free_release_script_uses_gh_as_primary_path(): void {
+		$script = file_get_contents($this->root . '/build/release-github-free.sh');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('command -v gh', $script);
+		self::assertStringContainsString('gh release create', $script);
+		self::assertStringContainsString('--verify-tag', $script);
+		self::assertStringContainsString('gh release view', $script);
+		self::assertStringContainsString('gh release upload', $script);
+		self::assertStringContainsString('gh release download', $script);
+		self::assertDoesNotMatchRegularExpression('/gh release upload[^\n]+--clobber/', $script);
+	}
+
+	public function test_github_free_release_script_prefers_gh_token_without_printing_tokens(): void {
+		$script = file_get_contents($this->root . '/build/release-github-free.sh');
+
+		self::assertIsString($script);
+		self::assertMatchesRegularExpression('/GH_TOKEN[^\\n]+GITHUB_TOKEN/s', $script);
+		self::assertStringContainsString('export GH_TOKEN="${GITHUB_TOKEN}"', $script);
+		self::assertStringNotContainsString('echo "${GH_TOKEN', $script);
+		self::assertStringNotContainsString('echo "${GITHUB_TOKEN', $script);
+	}
+
+	public function test_github_free_release_script_fails_closed_on_duplicate_or_wrong_assets(): void {
+		$script = file_get_contents($this->root . '/build/release-github-free.sh');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('asset_count', $script);
+		self::assertStringContainsString('expected exactly one asset', $script);
+		self::assertStringContainsString('do not use --clobber', $script);
+		self::assertStringContainsString('dry-run', $script);
 	}
 
 	private function run_command(string $command): array {

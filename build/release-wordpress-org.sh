@@ -63,7 +63,8 @@ ZIP="${ROOT}/dist/kazcode-universal-storage-${VERSION}.zip"
 php "${ROOT}/build/release-integrity.php" package --package "${ZIP}" --version "${VERSION}"
 
 svn checkout --depth immediates "${SVN_URL}" "${TMP}/svn" >/dev/null
-svn update "${TMP}/svn/trunk" "${TMP}/svn/tags" "${TMP}/svn/assets" >/dev/null || true
+svn update --set-depth infinity "${TMP}/svn/trunk" "${TMP}/svn/assets" >/dev/null || true
+svn update --set-depth immediates "${TMP}/svn/tags" >/dev/null || true
 if [[ -e "${TMP}/svn/tags/${VERSION}" ]]; then
 	echo "ERROR: WordPress.org tag ${VERSION} already exists; refusing overwrite." >&2
 	exit 1

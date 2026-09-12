@@ -25,7 +25,7 @@ Evidence tag: **CONFIRMED** = covered by unit characterization tests or source a
 
 ## Delete attachment keys (P0-T04)
 
-Remote delete inventory = current metadata paths + **current** `object_prefix` via `S3KeyResolver`.
+Remote delete inventory = current metadata paths + **current** `object_prefix` via `S3KeyResolver`.  
 `_s3ms_original_key` is a presence gate / UI value, **not** the full key list.
 
 Test: `DeleteAttachmentCharacterizationTest`.

@@ -6,18 +6,13 @@ WordPress keeps attachment posts, metadata, titles, alt text, and `_wp_attached_
 
 **Full documentation:** [kazcode.net/universal-storage/docs/](https://kazcode.net/universal-storage/docs/) — this README covers the same ground for people already reading the repo.
 
-This repository is the public source mirror for the **Free** KAZCODE Universal
-Storage WordPress plugin. The canonical production release source remains the
-main KAZCODE repository and immutable release tag; this mirror is synchronized
-from the Free plugin directory for each public Free release.
-
-- WordPress.org: <https://wordpress.org/plugins/kazcode-universal-storage/>
-- Product: <https://kazcode.net/universal-storage/>
-- Documentation: <https://kazcode.net/universal-storage/docs/>
-- Pro/pricing: <https://kazcode.net/universal-storage/#pricing>
-
-The commercial **Pro** add-on is a separate plugin (installed independently,
-requires Free active) and is **not** contained in this repository.
+This repository is the public development source for the **Free** KAZCODE Universal
+Storage WordPress plugin — [product page](https://kazcode.net/universal-storage/). The
+commercial **Pro** add-on is a separate plugin (installed independently, requires Free
+active) and is **not** contained in this repository. WordPress.org: <https://wordpress.org/plugins/kazcode-universal-storage/>.
+Product: <https://kazcode.net/universal-storage/>.
+Docs: <https://kazcode.net/universal-storage/docs/>.
+Pro/pricing: <https://kazcode.net/universal-storage/#pricing>.
 
 ## Table of contents
 
@@ -50,8 +45,6 @@ requires Free active) and is **not** contained in this repository.
 
 - **Offload** — new uploads (and every generated image size) move to remote storage automatically after WordPress finishes processing them.
 - **Migrate** — move existing Media Library files to remote storage in resumable batches, with dry-run and per-attachment modes.
-- **Resume** — large uploads use durable multipart state so interrupted work can continue safely.
-- **Adopt** — import existing inventory from WP Offload Media or Advanced Media Offloader without deleting competitor data.
 - **Restore** — download files back to local disk on demand; nothing is one-way.
 - **Repair** — re-upload or re-verify individual objects that failed or drifted, without touching everything else.
 - **Native UX** — Media Library Grid/List, the media modal, Featured Image, Gutenberg image blocks, and Edit Image all keep working exactly as before; theme and plugin static assets are never touched, only Media Library attachments.

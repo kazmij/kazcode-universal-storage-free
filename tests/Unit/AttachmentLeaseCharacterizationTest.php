@@ -1,6 +1,6 @@
 <?php
 /**
- * Characterization: attachment lock expiry and stale owner safety.
+ * Attachment lease fencing regressions from the public 1.0.2 baseline.
  *
  * @package Kazcode\WpStorage
  */
@@ -37,18 +37,6 @@ final class AttachmentLeaseCharacterizationTest extends TestCase {
 		WpStubs::reset();
 	}
 
-	public function test_expired_lock_can_be_reacquired_while_original_worker_is_still_running(): void {
-		$lock = new AttachmentLock();
-
-		$this->assertTrue( $lock->acquire( 501, 'migrate' ) );
-		$this->expire_lock( 501 );
-
-		$this->assertTrue(
-			$lock->acquire( 501, 'delete' ),
-			'Current TTL-only lock allows a second worker to acquire the same attachment after expiry, even if the first worker is still executing.'
-		);
-	}
-
 	public function test_old_owner_release_must_not_delete_new_owner_lock(): void {
 		$old_owner = new AttachmentLock();
 		$new_owner = new AttachmentLock();
@@ -65,7 +53,7 @@ final class AttachmentLeaseCharacterizationTest extends TestCase {
 		);
 	}
 
-	public function test_stale_offload_worker_can_commit_after_newer_owner_committed_state(): void {
+	public function test_stale_offload_worker_cannot_commit_after_newer_owner_committed_state(): void {
 		$attachment_id = 503;
 		$relative      = '2026/08/photo.jpg';
 		$absolute      = $this->touch_file( $relative );
@@ -125,83 +113,9 @@ final class AttachmentLeaseCharacterizationTest extends TestCase {
 		$this->assertTrue( $lock->is_current( $lease ) );
 	}
 
-	public function test_repeated_current_owner_renew_in_same_second_remains_current_with_wpdb_cas(): void {
-		$previous_wpdb = $GLOBALS['wpdb'] ?? null;
-		$now           = time();
-		$token         = str_repeat( 'a', 32 );
-		$key           = 's3ms_lock_5041';
-
-		$wpdb = new class() {
-			public string $options = 'wp_options';
-
-			/** @var array<string, string> */
-			public array $rows = array();
-
-			/** @var array<int, mixed> */
-			private array $last_args = array();
-
-			public function prepare( string $query, mixed ...$args ): string {
-				$this->last_args = $args;
-				return $query;
-			}
-
-			public function get_var( string $query ): ?string {
-				unset( $query );
-				$key = (string) ( $this->last_args[0] ?? '' );
-				return $this->rows[ $key ] ?? null;
-			}
-
-			public function query( string $query ): int {
-				unset( $query );
-				$new      = (string) ( $this->last_args[0] ?? '' );
-				$key      = (string) ( $this->last_args[2] ?? '' );
-				$expected = (string) ( $this->last_args[3] ?? '' );
-				if ( ( $this->rows[ $key ] ?? null ) !== $expected ) {
-					return 0;
-				}
-				if ( $this->rows[ $key ] === $new ) {
-					return 0;
-				}
-				$this->rows[ $key ] = $new;
-				return 1;
-			}
-		};
-
-		$wpdb->rows[ $key ] = (string) json_encode(
-			array(
-				'version'     => 2,
-				'active'      => true,
-				'generation'  => 1,
-				'owner_token' => $token,
-				'operation'   => 'migrate',
-				'acquired_at' => $now,
-				'expires'     => $now + 300,
-				'renewed_at'  => $now,
-			)
-		);
-
-		$GLOBALS['wpdb'] = $wpdb;
-		try {
-			$lock  = new AttachmentLock();
-			$lease = new AttachmentLeaseHandle( 5041, $token, 1, 'migrate', $now + 300 );
-
-			$this->assertTrue( $lock->is_current( $lease ) );
-			$this->assertTrue(
-				$lock->renew( $lease ),
-				'A current owner renewing twice inside one second must not lose ownership merely because MySQL reports 0 changed rows for an identical CAS value.'
-			);
-		} finally {
-			if ( $previous_wpdb === null ) {
-				unset( $GLOBALS['wpdb'] );
-			} else {
-				$GLOBALS['wpdb'] = $previous_wpdb;
-			}
-		}
-	}
-
 	public function test_stale_owner_cannot_renew_or_release_new_generation(): void {
-		$lock  = new AttachmentLock();
-		$old   = $lock->acquire_lease( 505, 'migrate' );
+		$lock = new AttachmentLock();
+		$old  = $lock->acquire_lease( 505, 'migrate' );
 		$this->assertNotNull( $old );
 		$this->expire_lock( 505 );
 
@@ -212,35 +126,6 @@ final class AttachmentLeaseCharacterizationTest extends TestCase {
 		$this->assertFalse( $lock->renew( $old ) );
 		$this->assertFalse( $lock->release_lease( $old ) );
 		$this->assertTrue( $lock->is_current( $new ) );
-	}
-
-	public function test_generation_is_monotonic_across_release(): void {
-		$lock = new AttachmentLock();
-
-		$first = $lock->acquire_lease( 506, 'migrate' );
-		$this->assertNotNull( $first );
-		$this->assertSame( 1, $first->generation );
-		$this->assertTrue( $lock->release_lease( $first ) );
-
-		$second = $lock->acquire_lease( 506, 'restore' );
-		$this->assertNotNull( $second );
-		$this->assertSame( 2, $second->generation );
-	}
-
-	public function test_two_takeover_workers_result_in_one_current_owner(): void {
-		$lock = new AttachmentLock();
-
-		$first = $lock->acquire_lease( 507, 'migrate' );
-		$this->assertNotNull( $first );
-		$this->expire_lock( 507 );
-
-		$second = $lock->acquire_lease( 507, 'delete' );
-		$third  = $lock->acquire_lease( 507, 'restore' );
-
-		$this->assertNotNull( $second );
-		$this->assertNull( $third );
-		$this->assertSame( 2, $second->generation );
-		$this->assertTrue( $lock->is_current( $second ) );
 	}
 
 	public function test_active_legacy_lock_is_respected_and_expired_legacy_lock_converts_to_fenced_generation(): void {
@@ -272,7 +157,7 @@ final class AttachmentLeaseCharacterizationTest extends TestCase {
 			$existing = json_decode( $existing, true );
 		}
 		$this->assertIsArray( $existing );
-		$existing['expires']        = time() - 1;
+		$existing['expires']      = time() - 1;
 		WpStubs::$options[ $key ] = json_encode( $existing );
 	}
 

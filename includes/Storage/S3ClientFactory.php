@@ -52,13 +52,12 @@ final class S3ClientFactory {
 		}
 		// iam_role: omit credentials → AWS SDK default provider chain (instance profile, env, etc.).
 
-		$is_aws_preset = (string) $this->settings->get( 'provider_preset', 'aws' ) === 'aws';
-		$endpoint      = $is_aws_preset ? '' : (string) $this->settings->get( 'endpoint', '' );
+		$endpoint = (string) $this->settings->get( 'endpoint', '' );
 		if ( $endpoint !== '' ) {
 			$config['endpoint'] = $endpoint;
 		}
 
-		if ( ! $is_aws_preset && (bool) $this->settings->get( 'force_path_style', false ) ) {
+		if ( (bool) $this->settings->get( 'force_path_style', false ) ) {
 			$config['use_path_style_endpoint'] = true;
 		}
 

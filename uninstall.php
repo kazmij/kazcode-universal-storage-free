@@ -56,6 +56,7 @@ function kazus_uninstall_clear_ephemeral_state(): void {
 	delete_option( 's3ms_adopt_run' );            // AdoptService resumable-batch cursor.
 	delete_option( 's3ms_background_job' );       // BackgroundMigrator resumable-batch cursor.
 	delete_option( 'kazus_background_tick_lease' ); // BackgroundMigrator tick concurrency lease.
+	delete_option( 's3ms_transfer_session_lease' ); // Stale transfer cleanup lease/state.
 
 	// Per-attachment processing locks (AttachmentLock) — dynamically named
 	// options, one per attachment ever locked (s3ms_lock_123, s3ms_lock_456,
@@ -70,6 +71,7 @@ function kazus_uninstall_clear_ephemeral_state(): void {
 	// Scheduled work owned by this plugin. wp_clear_scheduled_hook() is a
 	// no-op (not an error) if nothing is currently scheduled.
 	wp_clear_scheduled_hook( 'kazus_background_tick' );
+	wp_clear_scheduled_hook( 'kazus_stale_transfer_cleanup' );
 	if ( function_exists( 'as_unschedule_all_actions' ) ) {
 		// Removes only this plugin's own scheduled actions for this one hook —
 		// never touches Action Scheduler's shared tables/other plugins' actions.
@@ -108,10 +110,16 @@ function kazus_uninstall_purge_durable_state(): void {
 	// separate add-on's data and are not this uninstall's responsibility).
 	$s3ms_objects_table  = $wpdb->prefix . 's3ms_objects';
 	$s3ms_profiles_table = $wpdb->prefix . 's3ms_storage_profiles';
+	$s3ms_transfers_table = $wpdb->prefix . 's3ms_transfer_sessions';
+	$s3ms_import_runs_table = $wpdb->prefix . 's3ms_import_runs';
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded plugin-owned table name (not user input); DROP TABLE cannot be parameterized via $wpdb->prepare() placeholders, and a one-time uninstall schema change is exactly what this table's removal requires.
 	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_objects_table}" );
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded plugin-owned table name (not user input); DROP TABLE cannot be parameterized via $wpdb->prepare() placeholders, and a one-time uninstall schema change is exactly what this table's removal requires.
 	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_profiles_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded plugin-owned table name (not user input); DROP TABLE cannot be parameterized via $wpdb->prepare() placeholders, and a one-time uninstall schema change is exactly what this table's removal requires.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_transfers_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded plugin-owned table name (not user input); DROP TABLE cannot be parameterized via $wpdb->prepare() placeholders, and a one-time uninstall schema change is exactly what this table's removal requires.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_import_runs_table}" );
 
 	// Legacy/compat per-attachment postmeta. This never deletes the
 	// attachment post itself, never touches the local file, and never

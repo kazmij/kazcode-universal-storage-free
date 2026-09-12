@@ -26,7 +26,8 @@
   "scripts": {
     "test": "phpunit --configuration phpunit.xml.dist",
     "build:release": "bash build/build-release.sh",
-    "build:verify-scoped": "bash build/verify-scoped-build.sh"
+    "build:verify-scoped": "bash build/verify-scoped-build.sh",
+    "release:integrity": "php build/release-integrity.php"
   },
   "config": {
     "sort-packages": true,

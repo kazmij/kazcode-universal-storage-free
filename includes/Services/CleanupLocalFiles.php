@@ -14,8 +14,6 @@ defined( 'ABSPATH' ) || exit;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\LocalStoragePolicy;
 use Kazcode\WpStorage\Domain\RemoteObservation;
-use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
-use Kazcode\WpStorage\Infrastructure\AttachmentLock;
 use Kazcode\WpStorage\Storage\ObjectKeyService;
 use Kazcode\WpStorage\Storage\S3Storage;
 
@@ -42,8 +40,6 @@ final class CleanupLocalFiles {
 		array $manifest_items,
 		?bool $delete_override = null,
 		?string $profile_prefix = null,
-		?AttachmentLock $lock = null,
-		?AttachmentLeaseHandle $lease = null,
 	): array {
 		$policy = $this->resolve_policy( $delete_override );
 		if ( $policy === LocalStoragePolicy::KEEP_ALL ) {
@@ -65,35 +61,22 @@ final class CleanupLocalFiles {
 			);
 		}
 
-		foreach ( $targets as $relative => $absolute ) {
-			$verification = $this->verify_remote_for_local_delete( $relative, $absolute, $profile_prefix );
-			if ( ! $verification['ok'] ) {
+		foreach ( array_keys( $targets ) as $relative ) {
+			$absolute      = $targets[ $relative ];
+			$expected_size = is_file( $absolute ) ? (int) filesize( $absolute ) : null;
+			if ( ! $this->verify_remote_exists( $relative, $profile_prefix, $expected_size ) ) {
 				update_post_meta(
 					$attachment_id,
 					'_s3ms_last_error',
-					'Offloaded but local delete skipped; ' . $verification['reason'] . ': ' . $relative
+					'Offloaded but local delete skipped; remote missing: ' . $relative
 				);
 				return array(
 					'deleted' => 0,
 					'skipped' => true,
-					'message' => 'Local delete skipped after ' . $verification['reason'] . ' for ' . $relative,
+					'message' => 'Local delete skipped after verify failure for ' . $relative,
 					'policy'  => $policy,
 				);
 			}
-		}
-
-		if ( $lock !== null && $lease !== null && ! $lock->renew( $lease ) ) {
-			update_post_meta(
-				$attachment_id,
-				'_s3ms_last_error',
-				'Offloaded but local delete skipped; operation ownership lost.'
-			);
-			return array(
-				'deleted' => 0,
-				'skipped' => true,
-				'message' => 'Local delete skipped after operation ownership was lost.',
-				'policy'  => $policy,
-			);
 		}
 
 		LocalFileCleanup::delete_files( array_values( $targets ) );
@@ -162,47 +145,13 @@ final class CleanupLocalFiles {
 		}
 	}
 
-	/**
-	 * @return array{ok:bool,reason:string,level:string}
-	 */
-	private function verify_remote_for_local_delete( string $relative, string $absolute, ?string $profile_prefix ): array {
+	private function verify_remote_exists( string $relative, ?string $profile_prefix, ?int $expected_size ): bool {
 		if ( $profile_prefix !== null && $profile_prefix !== '' ) {
 			$key  = ObjectKeyService::key_for( $profile_prefix, $relative );
 			$head = $this->storage->head_key( $key );
 		} else {
 			$head = $this->storage->head_relative( $relative );
 		}
-
-		$size = filesize( $absolute );
-		$observation = RemoteObservation::from_head_result( $head, $size === false ? null : (int) $size );
-		if ( $observation->is_size_verified() ) {
-			return array(
-				'ok'     => true,
-				'reason' => 'size verified',
-				'level'  => RemoteObservation::SIZE_VERIFIED,
-			);
-		}
-
-		if ( $observation->verification_level === RemoteObservation::SIZE_MISMATCH ) {
-			return array(
-				'ok'     => false,
-				'reason' => 'remote size mismatch',
-				'level'  => RemoteObservation::SIZE_MISMATCH,
-			);
-		}
-
-		if ( $observation->is_confirmed_missing() ) {
-			return array(
-				'ok'     => false,
-				'reason' => 'remote confirmed missing',
-				'level'  => RemoteObservation::NOT_VERIFIED,
-			);
-		}
-
-		return array(
-			'ok'     => false,
-			'reason' => 'remote status unknown',
-			'level'  => RemoteObservation::NOT_VERIFIED,
-		);
+		return RemoteObservation::from_head_result( $head, $expected_size )->is_size_verified();
 	}
 }

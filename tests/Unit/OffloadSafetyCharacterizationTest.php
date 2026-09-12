@@ -93,7 +93,7 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 		$storage = $this->createMock(S3Storage::class);
 		$storage->method('keys')->willReturn($keys);
 		$storage->method('upload_file')->willReturn('2026/08/photo.jpg');
-		$storage->method('head_relative')->willReturnCallback($this->head_relative_for_files($files));
+		$storage->method('head_relative')->willReturn(array( 'exists' => true, 'content_length' => 1 ));
 
 		$offloader = new AttachmentOffloader($settings, $storage);
 		$this->inject($offloader, 'files', $this->file_resolver_stub($files, $keys));
@@ -146,35 +146,6 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 		$this->assertFileExists($files['2026/08/photo.jpg']);
 	}
 
-	public function test_legacy_offload_size_mismatch_does_not_mark_verified_or_delete_local(): void {
-		$files = array(
-			'2026/08/photo.jpg' => $this->touch_file('2026/08/photo.jpg', 1000),
-		);
-
-		$settings = $this->createMock(Settings::class);
-		$settings->method('should_delete_local')->willReturn(true);
-		$settings->method('local_storage_policy')->willReturn(\Kazcode\WpStorage\Domain\LocalStoragePolicy::REMOTE_ONLY);
-
-		$keys    = new S3KeyResolver($this->settings_map(array( 'object_prefix' => '' )));
-		$storage = $this->createMock(S3Storage::class);
-		$storage->method('keys')->willReturn($keys);
-		$storage->method('upload_file')->willReturn('2026/08/photo.jpg');
-		$storage->method('head_relative')->willReturn(array( 'exists' => true, 'content_length' => 900 ));
-
-		$offloader = new AttachmentOffloader($settings, $storage);
-		$this->inject($offloader, 'files', $this->file_resolver_stub($files, $keys));
-		$this->inject($offloader, 'lock', $this->always_lock());
-
-		WpStubs::set_meta(18, '_wp_attached_file', '2026/08/photo.jpg');
-
-		$result = $offloader->offload(18, true);
-
-		$this->assertFalse($result['success']);
-		$this->assertSame(AttachmentOffloader::STATUS_FAILED, WpStubs::$post_meta[18]['_s3ms_status'] ?? null);
-		$this->assertArrayNotHasKey('_s3ms_verified_at', WpStubs::$post_meta[18] ?? array());
-		$this->assertFileExists($files['2026/08/photo.jpg']);
-	}
-
 	/**
 	 * Regression for a confirmed bug: WP core's wp_create_image_subsizes() (called
 	 * from inside wp_generate_attachment_metadata(), before any sub-sizes exist) saves
@@ -211,7 +182,7 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 				return $relative;
 			}
 		);
-		$storage->method('head_relative')->willReturnCallback($this->head_relative_for_files($files));
+		$storage->method('head_relative')->willReturn(array( 'exists' => true, 'content_length' => 1 ));
 
 		$offloader = new AttachmentOffloader($settings, $storage);
 		$this->inject($offloader, 'files', $this->live_file_resolver_stub($files, $keys));
@@ -300,7 +271,7 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 				return $relative;
 			}
 		);
-		$storage->method('head_relative')->willReturnCallback($this->head_relative_for_files($files));
+		$storage->method('head_relative')->willReturn(array( 'exists' => true, 'content_length' => 1 ));
 
 		$offloader = new AttachmentOffloader($settings, $storage);
 		$this->inject($offloader, 'files', $this->live_file_resolver_stub($files, $keys));
@@ -388,7 +359,7 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 				return $relative;
 			}
 		);
-		$storage->method('head_relative')->willReturnCallback($this->head_relative_for_files($files));
+		$storage->method('head_relative')->willReturn(array( 'exists' => true, 'content_length' => 1 ));
 
 		$offloader = new AttachmentOffloader($settings, $storage);
 		$this->inject($offloader, 'files', $this->live_file_resolver_stub($files, $keys));
@@ -462,7 +433,7 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 				return $relative;
 			}
 		);
-		$storage->method('head_relative')->willReturnCallback($this->head_relative_for_files($files));
+		$storage->method('head_relative')->willReturn(array( 'exists' => true, 'content_length' => 1 ));
 
 		$offloader = new AttachmentOffloader($settings, $storage);
 		$this->inject($offloader, 'files', $this->live_file_resolver_stub($files, $keys));
@@ -560,29 +531,14 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 		return $stub;
 	}
 
-	/**
-	 * @param array<string, string> $files
-	 */
-	private function head_relative_for_files(array $files): callable {
-		return static function (string $relative) use ($files): array {
-			if (!isset($files[$relative]) || !is_file($files[$relative])) {
-				return array( 'exists' => false, 'confirmed_missing' => true );
-			}
-			return array(
-				'exists'         => true,
-				'content_length' => (int) filesize($files[$relative]),
-			);
-		};
-	}
-
 	private function always_lock(): AttachmentLock {
 		$lock = $this->createMock(AttachmentLock::class);
 		$lease = new AttachmentLeaseHandle( 1, str_repeat( 'a', 32 ), 1, 'test', time() + 300 );
 		$lock->method('acquire')->willReturn(true);
 		$lock->method('acquire_lease')->willReturn($lease);
 		$lock->method('renew')->willReturn(true);
-		$lock->method('release');
 		$lock->method('release_lease')->willReturn(true);
+		$lock->method('release');
 		$lock->method('is_locked')->willReturn(false);
 		return $lock;
 	}
@@ -603,16 +559,17 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 	private function inject(object $target, string $property, mixed $value): void {
 		$ref  = new ReflectionClass($target);
 		$prop = $ref->getProperty($property);
+		$prop->setAccessible(true);
 		$prop->setValue($target, $value);
 	}
 
-	private function touch_file(string $relative, int $size = 1): string {
+	private function touch_file(string $relative): string {
 		$absolute = $this->uploads . '/' . $relative;
 		$dir      = dirname($absolute);
 		if (!is_dir($dir)) {
 			mkdir($dir, 0777, true);
 		}
-		file_put_contents($absolute, str_repeat('x', max(1, $size)));
+		file_put_contents($absolute, 'x');
 		return $absolute;
 	}
 

@@ -46,7 +46,7 @@ final class ObjectRepository {
 	}
 
 	/**
-	 * Upsert by UNIQUE(storage_profile_id, object_key).
+	 * Upsert by UNIQUE(storage_profile_id, object_key_hash).
 	 *
 	 * @param array<string, mixed> $data Row fields.
 	 */
@@ -58,26 +58,84 @@ final class ObjectRepository {
 			throw new \InvalidArgumentException( 'storage_profile_id and object_key are required.' );
 		}
 
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock.
-		$existing_id = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$this->table()} WHERE storage_profile_id = %d AND object_key = %s", $profile_id, $key ) );
-
 		$now = gmdate( 'Y-m-d H:i:s' );
 		$data['updated_at'] = $now;
 		if ( empty( $data['created_at'] ) ) {
 			$data['created_at'] = $now;
 		}
+		$data['object_key_hash'] = hash( 'sha256', $key );
 
-		if ( $existing_id ) {
-			$id = (int) $existing_id;
-			unset( $data['created_at'] );
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin-owned table, see class docblock; $wpdb->update() already parameterizes values.
-			$wpdb->update( $this->table(), $data, array( 'id' => $id ) );
-			return $id;
+		$columns = array(
+			'attachment_id',
+			'storage_profile_id',
+			'local_relative_path',
+			'object_key',
+			'object_key_hash',
+			'variant_type',
+			'mime_type',
+			'size_bytes',
+			'etag',
+			'checksum',
+			'local_status',
+			'remote_status',
+			'attempt_count',
+			'last_error_code',
+			'last_error_message',
+			'offloaded_at',
+			'verified_at',
+			'created_at',
+			'updated_at',
+		);
+		$integer_columns = array( 'attachment_id', 'storage_profile_id', 'size_bytes', 'attempt_count' );
+		$insert_columns  = array();
+		$placeholders    = array();
+		$values          = array();
+		foreach ( $columns as $column ) {
+			if ( ! array_key_exists( $column, $data ) ) {
+				continue;
+			}
+			$insert_columns[] = $column;
+			$placeholders[]   = in_array( $column, $integer_columns, true ) && $data[ $column ] !== null ? '%d' : '%s';
+			$values[]         = $data[ $column ];
 		}
 
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin-owned table, see class docblock; $wpdb->insert() already parameterizes values.
-		$wpdb->insert( $this->table(), $data );
-		return (int) $wpdb->insert_id;
+		$update_columns = array_values(
+			array_diff(
+				$insert_columns,
+				array( 'created_at', 'storage_profile_id', 'object_key', 'object_key_hash' )
+			)
+		);
+		$updates        = array_map(
+			static fn( string $column ): string => "{$column} = VALUES({$column})",
+			$update_columns
+		);
+		$updates[]      = 'id = LAST_INSERT_ID(id)';
+
+		$sql = sprintf(
+			'INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
+			$this->table(),
+			implode( ', ', $insert_columns ),
+			implode( ', ', $placeholders ),
+			implode( ', ', $updates )
+		);
+
+		// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- SQL is assembled from a fixed column allowlist above; all values are placeholders.
+		$result = $wpdb->query( $wpdb->prepare( $sql, ...$values ) );
+		if ( $result === false ) {
+			throw new \RuntimeException( 'Object upsert failed.' );
+		}
+
+		$id = (int) $wpdb->insert_id;
+		if ( $id <= 0 ) {
+			throw new \RuntimeException( 'Object upsert failed: database did not return an object id.' );
+		}
+
+		$row = $this->find_by_id( $id );
+		if ( ! is_array( $row ) || (int) ( $row['storage_profile_id'] ?? 0 ) !== $profile_id || (string) ( $row['object_key'] ?? '' ) !== $key ) {
+			throw new \RuntimeException( 'Object upsert returned a mismatched object key.' );
+		}
+
+		return $id;
 	}
 
 	public function count_for_attachment( int $attachment_id ): int {
@@ -113,6 +171,16 @@ final class ObjectRepository {
 	}
 
 	/**
+	 * @return array<string, mixed>|null
+	 */
+	public function find_by_profile_and_key( int $storage_profile_id, string $object_key ): ?array {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock.
+		$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$this->table()} WHERE storage_profile_id = %d AND object_key = %s", $storage_profile_id, $object_key ), ARRAY_A );
+		return is_array( $row ) ? $row : null;
+	}
+
+	/**
 	 * @return list<array<string, mixed>>
 	 */
 	public function find_by_attachment_and_statuses( int $attachment_id, array $statuses ): array {
@@ -144,29 +212,6 @@ final class ObjectRepository {
 				array_map( 'strval', $rows )
 			)
 		);
-	}
-
-	/**
-	 * @return list<array<string, mixed>>
-	 */
-	public function find_by_profile_and_key( int $storage_profile_id, string $object_key ): array {
-		global $wpdb;
-		if ( $storage_profile_id <= 0 || $object_key === '' ) {
-			return array();
-		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock.
-		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$this->table()} WHERE storage_profile_id = %d AND object_key = %s ORDER BY id ASC", $storage_profile_id, $object_key ), ARRAY_A );
-		return is_array( $rows ) ? $rows : array();
-	}
-
-	public function mark_deleted_by_profile_key_if_stale( int $storage_profile_id, string $object_key ): int {
-		global $wpdb;
-		if ( $storage_profile_id <= 0 || $object_key === '' ) {
-			return 0;
-		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock; source cleanup is allowed to finalize only rows already marked STALE.
-		$updated = $wpdb->query( $wpdb->prepare( "UPDATE {$this->table()} SET remote_status = %s, updated_at = %s WHERE storage_profile_id = %d AND object_key = %s AND remote_status = %s", ObjectRemoteStatus::DELETED, gmdate( 'Y-m-d H:i:s' ), $storage_profile_id, $object_key, ObjectRemoteStatus::STALE ) );
-		return is_int( $updated ) ? $updated : 0;
 	}
 
 	/**
@@ -246,6 +291,20 @@ final class ObjectRepository {
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock; called immediately after profile create/delete mutations, so a cached count would be stale by design.
 		return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$this->table()} WHERE storage_profile_id = %d", $storage_profile_id ) );
+	}
+
+	public function has_active_reference_for_profile_key( int $storage_profile_id, string $object_key ): bool {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock; source-delete safety must read current DB state immediately before remote delete.
+		$count = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$this->table()} WHERE storage_profile_id = %d AND object_key = %s AND remote_status IN (%s, %s)", $storage_profile_id, $object_key, ObjectRemoteStatus::PRESENT, ObjectRemoteStatus::UPLOADING ) );
+		return (int) $count > 0;
+	}
+
+	public function mark_deleted_by_profile_key( int $storage_profile_id, string $object_key ): int {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock; called only after remote source delete succeeds.
+		$updated = $wpdb->query( $wpdb->prepare( "UPDATE {$this->table()} SET remote_status = %s, updated_at = %s WHERE storage_profile_id = %d AND object_key = %s AND remote_status = %s", ObjectRemoteStatus::DELETED, gmdate( 'Y-m-d H:i:s' ), $storage_profile_id, $object_key, ObjectRemoteStatus::STALE ) );
+		return is_int( $updated ) ? $updated : 0;
 	}
 
 	/**

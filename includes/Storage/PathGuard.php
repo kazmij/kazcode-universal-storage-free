@@ -46,7 +46,7 @@ final class PathGuard {
 			if ($segment === '' || $segment === '.') {
 				continue;
 			}
-			if ($segment === '..') {
+			if (self::is_parent_segment($segment)) {
 				throw new \InvalidArgumentException('Path traversal is not allowed in media paths.');
 			}
 			$stack[] = $segment;
@@ -58,6 +58,27 @@ final class PathGuard {
 		}
 
 		return $normalized;
+	}
+
+	/**
+	 * Whether a relative path contains an actual parent-directory segment.
+	 *
+	 * @param string $path Candidate relative path.
+	 */
+	public static function has_parent_segment(string $path): bool {
+		$path = str_replace('\\', '/', $path);
+
+		foreach (explode('/', $path) as $segment) {
+			if (self::is_parent_segment($segment)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static function is_parent_segment(string $segment): bool {
+		return $segment === '..';
 	}
 
 	/**

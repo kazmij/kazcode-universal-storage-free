@@ -35,15 +35,23 @@ use Kazcode\WpStorage\Domain\ArrayDiff;
 use Kazcode\WpStorage\Infrastructure\BatchProcessor;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueFactory;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueGateway;
+use Kazcode\WpStorage\Infrastructure\ImportRunRepository;
 use Kazcode\WpStorage\Infrastructure\SchemaMigrator;
+use Kazcode\WpStorage\Infrastructure\TransferSessionRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
+use Kazcode\WpStorage\Import\ImportRegistry;
+use Kazcode\WpStorage\Services\AdoptAttachmentService;
 use Kazcode\WpStorage\Services\LegacyProfileMigrator;
 use Kazcode\WpStorage\Services\AuditLog;
 use Kazcode\WpStorage\Services\BackgroundMigrator;
 use Kazcode\WpStorage\Services\ConnectionTestService;
+use Kazcode\WpStorage\Services\CompetitorImportService;
 use Kazcode\WpStorage\Services\FailedItemsService;
 use Kazcode\WpStorage\Services\MigrationService;
+use Kazcode\WpStorage\Services\ResumableTransferService;
+use Kazcode\WpStorage\Services\StaleTransferCleanupService;
 use Kazcode\WpStorage\Services\VerificationService;
+use Kazcode\WpStorage\Storage\ProfileStorageGateway;
 use Kazcode\WpStorage\Storage\PublicUrlResolver;
 use Kazcode\WpStorage\Storage\S3ClientFactory;
 use Kazcode\WpStorage\Storage\S3KeyResolver;
@@ -72,6 +80,9 @@ final class Plugin {
 	private ?BackgroundMigrator $background = null;
 	private ?QueueGateway $queue = null;
 	private ?FailedItemsService $failed_items = null;
+	private ?ResumableTransferService $resumable_transfers = null;
+	private ?StaleTransferCleanupService $stale_transfer_cleanup = null;
+	private ?CompetitorImportService $competitor_imports = null;
 
 	private function __construct() {
 		$this->settings = new Settings();
@@ -181,6 +192,7 @@ final class Plugin {
 
 		$this->background()->register();
 		$this->queue()->register();
+		$this->register_stale_transfer_cleanup();
 		$this->url_filter()->register();
 		$this->offloader()->register();
 		$this->local_file_provider()->register();
@@ -303,6 +315,76 @@ final class Plugin {
 			);
 		}
 		return $this->storage;
+	}
+
+	/**
+	 * Shared resumable transfer engine.
+	 */
+	public function resumable_transfers(): ResumableTransferService {
+		if ( $this->resumable_transfers === null ) {
+			$profiles = new WpdbStorageProfileRepository();
+			$this->resumable_transfers = new ResumableTransferService(
+				new TransferSessionRepository(),
+				function ( int $destination_profile_id ) use ( $profiles ): ProfileStorageGateway {
+					$profile = $profiles->find( $destination_profile_id );
+					if ( $profile === null ) {
+						throw new \RuntimeException( 'Destination storage profile is unavailable.' );
+					}
+					return new ProfileStorageGateway( $profile, $this->settings );
+				},
+				null,
+				null,
+				$this->audit_log()
+			);
+		}
+		return $this->resumable_transfers;
+	}
+
+	/**
+	 * Shared stale multipart cleanup service.
+	 */
+	public function stale_transfer_cleanup(): StaleTransferCleanupService {
+		if ( $this->stale_transfer_cleanup === null ) {
+			$profiles = new WpdbStorageProfileRepository();
+			$this->stale_transfer_cleanup = new StaleTransferCleanupService(
+				new TransferSessionRepository(),
+				function ( int $destination_profile_id ) use ( $profiles ): ProfileStorageGateway {
+					$profile = $profiles->find( $destination_profile_id );
+					if ( $profile === null ) {
+						throw new \RuntimeException( 'Destination storage profile is unavailable.' );
+					}
+					return new ProfileStorageGateway( $profile, $this->settings );
+				},
+				$this->audit_log()
+			);
+		}
+		return $this->stale_transfer_cleanup;
+	}
+
+	private function register_stale_transfer_cleanup(): void {
+		$hook = 'kazus_stale_transfer_cleanup';
+		add_action( $hook, array( $this->stale_transfer_cleanup(), 'run' ) );
+		if ( ! wp_next_scheduled( $hook ) ) {
+			wp_schedule_event( time() + 3600, 'daily', $hook );
+		}
+	}
+
+	/**
+	 * Shared competitor import orchestration service.
+	 */
+	public function competitor_imports(): CompetitorImportService {
+		if ( $this->competitor_imports === null ) {
+			$profiles = new WpdbStorageProfileRepository();
+			$this->competitor_imports = new CompetitorImportService(
+				ImportRegistry::defaults(),
+				new ImportRunRepository(),
+				new AdoptAttachmentService( $this->settings, null, null, $profiles ),
+				$profiles,
+				$this->settings,
+				$this->audit_log()
+			);
+		}
+		return $this->competitor_imports;
 	}
 
 	/**

@@ -12,25 +12,23 @@ namespace Kazcode\WpStorage\Infrastructure;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Uses wp_options for no-schema-change 1.0.x compatibility. Production writes
- * use direct SQL compare-and-swap so expired takeover, renew, and release are
- * based on the authoritative database row rather than a stale object cache read.
+ * Uses wp_options for no-schema-change compatibility. Production writes use
+ * direct SQL compare-and-swap when available so expired takeover, renew, and
+ * release are based on the authoritative option row rather than a stale object
+ * cache read.
  */
 final class AttachmentLock {
 
-	private const TTL_SECONDS = 300;
+	private const TTL_SECONDS    = 300;
 	private const FORMAT_VERSION = 2;
 
 	/**
-	 * Legacy bool acquire wrapper. State-mutating code must use acquire_lease().
+	 * Legacy bool acquire wrapper. State-mutating code should use acquire_lease().
 	 */
 	public function acquire( int $attachment_id, string $operation ): bool {
 		return $this->acquire_lease( $attachment_id, $operation ) instanceof AttachmentLeaseHandle;
 	}
 
-	/**
-	 * Attempt to acquire a fenced attachment lease.
-	 */
 	public function acquire_lease( int $attachment_id, string $operation ): ?AttachmentLeaseHandle {
 		$key = $this->option_key( $attachment_id );
 
@@ -73,9 +71,6 @@ final class AttachmentLock {
 		return null;
 	}
 
-	/**
-	 * Renew only the current owner/current generation.
-	 */
 	public function renew( AttachmentLeaseHandle $lease ): bool {
 		$key = $this->option_key( $lease->attachment_id );
 
@@ -87,8 +82,8 @@ final class AttachmentLock {
 				return false;
 			}
 
-			$new_state            = $state['raw'];
-			$new_state['expires'] = $now + self::TTL_SECONDS;
+			$new_state               = $state['raw'];
+			$new_state['expires']    = $now + self::TTL_SECONDS;
 			$new_state['renewed_at'] = $now;
 
 			if ( $this->cas_update( $key, $raw, $new_state ) ) {
@@ -101,9 +96,6 @@ final class AttachmentLock {
 		return false;
 	}
 
-	/**
-	 * Release only the current owner/current generation. Generation survives.
-	 */
 	public function release_lease( AttachmentLeaseHandle $lease ): bool {
 		$key = $this->option_key( $lease->attachment_id );
 
@@ -145,17 +137,11 @@ final class AttachmentLock {
 		return false;
 	}
 
-	/**
-	 * Whether any non-expired lease exists. This is not proof of ownership.
-	 */
 	public function is_locked( int $attachment_id ): bool {
 		$state = $this->parse_state( $this->read_option_value( $this->option_key( $attachment_id ) ) );
 		return $state['active'] && (int) $state['expires'] > time();
 	}
 
-	/**
-	 * Whether this exact handle still owns the current non-expired generation.
-	 */
 	public function is_current( AttachmentLeaseHandle $lease ): bool {
 		$state = $this->parse_state( $this->read_option_value( $this->option_key( $lease->attachment_id ) ) );
 		return $this->matches_current_owner( $state, $lease, time() );
@@ -165,6 +151,9 @@ final class AttachmentLock {
 		return self::TTL_SECONDS;
 	}
 
+	/**
+	 * @param array<string, mixed> $state
+	 */
 	private function matches_current_owner( array $state, AttachmentLeaseHandle $lease, ?int $now ): bool {
 		if ( ! $state['valid'] || ! $state['active'] ) {
 			return false;
@@ -255,6 +244,9 @@ final class AttachmentLock {
 		);
 	}
 
+	/**
+	 * @param array<string, mixed> $new_state
+	 */
 	private function cas_update( string $key, mixed $expected, array $new_state ): bool {
 		global $wpdb;
 		$new_value      = $this->storage_value( $new_state );
@@ -285,6 +277,9 @@ final class AttachmentLock {
 		return true;
 	}
 
+	/**
+	 * @param array<string, mixed> $state
+	 */
 	private function storage_value( array $state ): string {
 		if ( function_exists( 'wp_json_encode' ) ) {
 			return (string) wp_json_encode( $state );

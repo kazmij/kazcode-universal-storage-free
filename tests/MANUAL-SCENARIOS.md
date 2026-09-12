@@ -61,6 +61,34 @@ Run against a WordPress site with the plugin activated and a writable S3 (or Min
 5. Re-trigger an offload for that attachment (e.g. Media Library bulk action → Offload). Confirm it succeeds cleanly, as if never previously attempted.
 6. Check Logs (Pro) for a `failed_items_cleared` entry with the right count.
 
+## Scenario I — Competitor import wizard state transitions
+
+1. Open Universal Storage → Migration and find exactly one **Switch from another plugin** panel. Initial state is Detect: the source selector contains only **Detect sources first**, the profile selector is enabled, **Analyze** and **Commit import** are disabled, pause/resume/cancel are disabled, and all report counters show `0`.
+2. Click **Detect sources**. Expected REST call: `GET kazcode-storage/v1/imports/detect`. The source selector is rebuilt from detected source IDs without secret/access-key/token fields; an error response displays only the sanitized service message in the panel status and does not add options from the error JSON.
+3. Select a detected source and storage profile, then click **Analyze**. Expected REST call: `POST kazcode-storage/v1/imports/dry-run/start` with `source` and `profile`. The returned run UUID becomes the current run, step state changes to Analyze, pause/cancel are enabled, resume remains disabled, and **Commit import** remains disabled.
+4. While the dry-run is `running`, polling `GET kazcode-storage/v1/imports/{uuid}` updates Attachments scanned, Objects checked, Verified / adopted, Confirmed missing, Transient errors, Conflicts, Skipped, and Updated. If that GET returns a non-2xx REST application error, polling stops, the panel displays only the sanitized service message, and the wizard controls are no longer left in a stale running state. If the run becomes `paused`, Pause is disabled and Resume is enabled. If the run becomes `cancelled` or `failed`, Commit stays disabled.
+5. When polling returns the same dry-run UUID with `mode=dry_run` and `status=completed`, the state changes to Import, pause/resume/cancel are disabled, and **Commit import** becomes enabled for that same source/profile pair.
+6. Click **Commit import**. Expected REST call: `POST kazcode-storage/v1/imports/commit/start` with the selected source/profile. The returned commit UUID becomes the current run, Commit is disabled again, pause/cancel are enabled, and polling updates the same counters until completion.
+7. When commit polling returns `status=completed`, the state changes to Report, all run controls are disabled, the final counters remain visible, and multipart work is shown only as resumable transfer progress, never as S3 part-size/concurrency tuning controls.
+8. During any running dry-run or commit, Pause/Resume/Cancel call `POST kazcode-storage/v1/imports/{current_uuid}/pause|resume|cancel`; they must not operate without the current run UUID.
+
+## Scenario J — 1.1.0 release qualification
+
+Run these checks against the built ZIP, not a live source mount. Configure an S3-compatible
+profile (MinIO is suitable) and record the attachment IDs, object keys, and transfer/import
+run UUIDs used for the run.
+
+1. Install the Free ZIP on a clean site, activate it, configure an S3/R2-style profile, and confirm the connection test succeeds. Install/activate Pro only for checks 8-9.
+2. Upload a small image. Confirm the expected objects are present and its Media Library URL resolves through the configured delivery host.
+3. Upload a file over a test-overridden multipart threshold, interrupt after at least one part, then resume. Confirm the same transfer session reconciles provider parts, does not upload completed parts again, and completes only after a destination HEAD with the expected size.
+4. Enable delete-local-after-upload for a test attachment. Confirm the local file remains if destination verification fails or is transient, and is removed only after verified destination success.
+5. With a WP Offload Media fixture/site, run Detect then a dry-run. Confirm the exact source keys are checked, no KAZCODE object inventory is written by the dry-run, and no source credentials appear in the response, DOM, logs, or report. Commit only after a completed matching dry-run and confirm verified objects are adopted without re-upload.
+6. Repeat step 5 with an Advanced Media Offloader fixture/site. Confirm malformed source data is skipped/reported rather than guessed and the competitor's data is unchanged.
+7. Force a transient/auth/network HEAD failure during either import. Confirm it is reported as transient and is not persisted as `missing` or used to mark the attachment offloaded.
+8. In Pro, interrupt a cross-provider migration after work begins. Confirm the source inventory row remains `present` and its delivery URL remains active.
+9. Complete a Pro cross-provider migration. Confirm the destination is HEAD-verified and committed before the source becomes `stale`, its URL changes, or source deletion is queued.
+10. Uninstall with preserve selected, then with the opt-in purge setting in a disposable site. Preserve must retain import/transfer recovery tables; purge must remove them. Neither mode may contact remote storage or delete media objects.
+
 ## CLI smoke
 
 ```bash

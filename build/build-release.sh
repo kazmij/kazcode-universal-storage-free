@@ -22,6 +22,8 @@ DIST="${ROOT}/dist"
 STAGE="${DIST}/.stage-build"
 VERSION="$(grep -m1 "KAZUS_VERSION" "${ROOT}/kazcode-universal-storage.php" | sed -E "s/.*'([0-9.]+)'.*/\1/")"
 SCOPER_BIN="${ROOT}/vendor/bin/php-scoper"
+SCOPER_MEMORY_LIMIT="${SCOPER_MEMORY_LIMIT:-1024M}"
+COMPOSER_AUTOLOADER_SUFFIX="${KAZUS_COMPOSER_AUTOLOADER_SUFFIX:-8cdd760b077ab5b8842437bb000793cb}"
 
 CORE_SLUG="kazcode-universal-storage"
 PRO_SLUG="kazcode-universal-storage-pro"
@@ -91,6 +93,10 @@ run_php() {
 
 composer_in_stage() {
 	local docker_rel="${STAGE#${REPO_ROOT}/app/}"
+	local composer_json="${STAGE}/${CORE_SLUG}/composer.json"
+	local composer_json_backup="${STAGE}/${CORE_SLUG}/composer.json.release-build.bak"
+	cp "${composer_json}" "${composer_json_backup}"
+	php -r '$file = $argv[1]; $suffix = $argv[2]; $json = json_decode(file_get_contents($file), true, 512, JSON_THROW_ON_ERROR); $json["config"]["autoloader-suffix"] = $suffix; file_put_contents($file, json_encode($json, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL);' "${composer_json}" "${COMPOSER_AUTOLOADER_SUFFIX}"
 	if command -v composer >/dev/null 2>&1; then
 		( cd "${STAGE}/${CORE_SLUG}" && composer install --no-dev --optimize-autoloader --no-interaction )
 	elif [[ -f "${REPO_ROOT}/docker-compose.yml" ]]; then
@@ -99,6 +105,7 @@ composer_in_stage() {
 		echo "ERROR: composer not found and docker compose unavailable." >&2
 		exit 1
 	fi
+	mv "${composer_json_backup}" "${composer_json}"
 }
 
 run_php_in_stage() {
@@ -116,9 +123,9 @@ scope_in_stage() {
 		cd "${STAGE}/${CORE_SLUG}"
 		rm -rf build/scoped
 		if command -v php >/dev/null 2>&1; then
-			"${SCOPER_BIN}" add-prefix --force --output-dir=build/scoped
+			php -d memory_limit="${SCOPER_MEMORY_LIMIT}" "${SCOPER_BIN}" add-prefix --force --output-dir=build/scoped
 		elif [[ -f "${REPO_ROOT}/docker-compose.yml" ]]; then
-			( cd "${REPO_ROOT}" && docker compose exec -T php bash -c "cd ${docker_rel} && ${container_scoper} add-prefix --force --output-dir=build/scoped" )
+			( cd "${REPO_ROOT}" && docker compose exec -T php bash -c "cd ${docker_rel} && php -d memory_limit=${SCOPER_MEMORY_LIMIT} ${container_scoper} add-prefix --force --output-dir=build/scoped" )
 		else
 			echo "ERROR: php required to run php-scoper." >&2
 			exit 1
@@ -128,6 +135,7 @@ scope_in_stage() {
 		mv build/scoped/includes includes
 		rm -rf build/scoped
 		cp "${ROOT}/build/scoped-vendor-bootstrap.php" vendor/kazcode-scoped.php
+		run_php "${ROOT}/build/prefix-scoped-autoload-file-ids.php" "${STAGE}/${CORE_SLUG}"
 	)
 }
 
@@ -176,10 +184,6 @@ rm -rf "${STAGE}/${CORE_SLUG}/tests" \
 	"${STAGE}/${CORE_SLUG}/BUILD.md" \
 	"${STAGE}/${CORE_SLUG}/test-product-features-local.php"
 find "${STAGE}/${CORE_SLUG}" -maxdepth 1 -name 'docker-compose*.yml' -delete 2>/dev/null || true
-
-# aws-crt-php ships this Python formatter helper in the upstream package, but
-# the WordPress plugin runtime never calls it and WordPress.org does not allow
-# Python application files inside distributed plugin ZIPs.
 rm -f "${STAGE}/${CORE_SLUG}/vendor/aws/aws-crt-php/format-check.py"
 
 echo "==> Packaging ${CORE_SLUG}-${VERSION}.zip"

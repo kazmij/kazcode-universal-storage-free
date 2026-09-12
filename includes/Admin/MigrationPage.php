@@ -13,6 +13,7 @@ defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Plugin;
 use Kazcode\WpStorage\Services\MigrationService;
+use Kazcode\WpStorage\Services\StorageProfileAdminService;
 
 /**
  * Batch migrate / verify / restore UI.
@@ -46,6 +47,7 @@ final class MigrationPage {
 
 		$stats    = $this->migration->stats();
 		$settings = Plugin::instance()->settings();
+		$profiles = $this->storage_profiles();
 		$total    = (int) $stats['total'];
 		$off      = (int) $stats['offloaded'];
 		$pct      = $total > 0 ? (int) round( ( $off / $total ) * 100 ) : 0;
@@ -108,6 +110,66 @@ final class MigrationPage {
 						<div class="s3ms-stat is-error"><span class="s3ms-stat__label"><?php esc_html_e( 'Failed', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value"><?php echo esc_html( (string) $stats['failed'] ); ?></strong></div>
 						<div class="s3ms-stat is-info"><span class="s3ms-stat__label"><?php esc_html_e( 'Verified', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value"><?php echo esc_html( (string) $stats['verified'] ); ?></strong></div>
 					</div>
+				</div>
+			</section>
+
+			<section class="s3ms-card" id="s3ms-import-wizard" data-s3ms-import-state="detect">
+				<div class="s3ms-card__head">
+					<div>
+						<h2 class="s3ms-card__title"><?php esc_html_e( 'Switch from another plugin', 'kazcode-universal-storage' ); ?></h2>
+						<p class="s3ms-card__intro"><?php esc_html_e( 'Detect existing offload metadata, analyze remote objects, then adopt verified media into KAZCODE inventory without re-uploading.', 'kazcode-universal-storage' ); ?></p>
+					</div>
+					<ol class="s3ms-import-steps" aria-label="<?php esc_attr_e( 'Import progress', 'kazcode-universal-storage' ); ?>">
+						<li class="is-active" data-s3ms-import-step="detect"><?php esc_html_e( 'Detect', 'kazcode-universal-storage' ); ?></li>
+						<li data-s3ms-import-step="storage"><?php esc_html_e( 'Storage', 'kazcode-universal-storage' ); ?></li>
+						<li data-s3ms-import-step="analyze"><?php esc_html_e( 'Analyze', 'kazcode-universal-storage' ); ?></li>
+						<li data-s3ms-import-step="import"><?php esc_html_e( 'Import', 'kazcode-universal-storage' ); ?></li>
+						<li data-s3ms-import-step="report"><?php esc_html_e( 'Report', 'kazcode-universal-storage' ); ?></li>
+					</ol>
+				</div>
+				<div class="s3ms-card__body">
+					<div class="s3ms-fields s3ms-import-fields">
+						<div class="s3ms-field" id="s3ms-import-source-wrap">
+							<label class="s3ms-field__label" for="s3ms-import-source"><?php esc_html_e( 'Source plugin', 'kazcode-universal-storage' ); ?></label>
+							<select class="s3ms-field__input" id="s3ms-import-source">
+								<option value=""><?php esc_html_e( 'Detect sources first', 'kazcode-universal-storage' ); ?></option>
+							</select>
+						</div>
+						<div class="s3ms-field">
+							<label class="s3ms-field__label" for="s3ms-import-profile"><?php esc_html_e( 'Storage profile', 'kazcode-universal-storage' ); ?></label>
+							<select class="s3ms-field__input" id="s3ms-import-profile">
+								<option value=""><?php esc_html_e( 'Choose a KAZCODE storage profile', 'kazcode-universal-storage' ); ?></option>
+								<?php foreach ( $profiles as $profile ) : ?>
+									<option value="<?php echo esc_attr( (string) ( $profile['id'] ?? '' ) ); ?>">
+										<?php echo esc_html( (string) ( $profile['name'] ?? __( 'Storage profile', 'kazcode-universal-storage' ) ) ); ?>
+									</option>
+								<?php endforeach; ?>
+							</select>
+							<span class="s3ms-field__help"><?php esc_html_e( 'Use credentials already configured in KAZCODE. Competitor secrets are never copied or shown here.', 'kazcode-universal-storage' ); ?></span>
+						</div>
+					</div>
+
+					<p class="s3ms-actions s3ms-import-actions">
+						<button type="button" class="button" data-s3ms-import-action="detect"><?php esc_html_e( 'Detect sources', 'kazcode-universal-storage' ); ?></button>
+						<button type="button" class="button button-secondary" data-s3ms-import-action="analyze"><?php esc_html_e( 'Analyze', 'kazcode-universal-storage' ); ?></button>
+						<button type="button" class="button button-primary" data-s3ms-import-action="commit" disabled><?php esc_html_e( 'Commit import', 'kazcode-universal-storage' ); ?></button>
+						<button type="button" class="button" data-s3ms-import-action="pause" disabled><?php esc_html_e( 'Pause', 'kazcode-universal-storage' ); ?></button>
+						<button type="button" class="button" data-s3ms-import-action="resume" disabled><?php esc_html_e( 'Resume', 'kazcode-universal-storage' ); ?></button>
+						<button type="button" class="button" data-s3ms-import-action="cancel" disabled><?php esc_html_e( 'Cancel', 'kazcode-universal-storage' ); ?></button>
+					</p>
+					<div class="s3ms-test-result" id="s3ms-import-status" role="status" aria-live="polite"></div>
+
+					<div class="s3ms-status-grid s3ms-status-grid--import" id="s3ms-import-report">
+						<div class="s3ms-stat is-muted"><span class="s3ms-stat__label"><?php esc_html_e( 'Attachments scanned', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="processed">0</strong></div>
+						<div class="s3ms-stat is-muted"><span class="s3ms-stat__label"><?php esc_html_e( 'Objects checked', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="objects_checked">0</strong></div>
+						<div class="s3ms-stat is-ok"><span class="s3ms-stat__label"><?php esc_html_e( 'Verified / adopted', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="verified">0</strong></div>
+						<div class="s3ms-stat is-warn"><span class="s3ms-stat__label"><?php esc_html_e( 'Confirmed missing', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="missing">0</strong></div>
+						<div class="s3ms-stat is-error"><span class="s3ms-stat__label"><?php esc_html_e( 'Transient errors', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="transient_errors">0</strong></div>
+						<div class="s3ms-stat is-error"><span class="s3ms-stat__label"><?php esc_html_e( 'Conflicts', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="conflicts">0</strong></div>
+						<div class="s3ms-stat is-muted"><span class="s3ms-stat__label"><?php esc_html_e( 'Skipped', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="skipped">0</strong></div>
+						<div class="s3ms-stat is-info"><span class="s3ms-stat__label"><?php esc_html_e( 'Updated', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="updated">—</strong></div>
+					</div>
+					<p class="description" id="s3ms-import-transfer-progress"><?php esc_html_e( 'Large objects resume transfer progress automatically when interrupted; no S3 multipart tuning is required.', 'kazcode-universal-storage' ); ?></p>
 				</div>
 			</section>
 
@@ -272,5 +334,17 @@ wp universal-storage adopt --dry-run</pre>
 			<?php AdminLayout::footer(); ?>
 		</div>
 		<?php
+	}
+
+	/**
+	 * @return list<array<string, mixed>>
+	 */
+	private function storage_profiles(): array {
+		try {
+			$profiles = ( new StorageProfileAdminService( Plugin::instance()->settings() ) )->list_summaries();
+			return is_array( $profiles ) ? array_values( $profiles ) : array();
+		} catch ( \Throwable ) {
+			return array();
+		}
 	}
 }

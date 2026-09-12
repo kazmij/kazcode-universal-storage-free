@@ -490,6 +490,17 @@ final class CliCommand {
 			\WP_CLI::line( wp_json_encode( $switch ) );
 		}
 
+		if ( (int) ( $result['failed'] ?? 0 ) > 0 ) {
+			\WP_CLI::error(
+				sprintf(
+					'Batch completed with failures. processed=%d success=%d failed=%d',
+					(int) ( $result['processed'] ?? 0 ),
+					(int) ( $result['success'] ?? 0 ),
+					(int) ( $result['failed'] ?? 0 )
+				)
+			);
+		}
+
 		\WP_CLI::success(
 			sprintf(
 				'Batch complete. processed=%d success=%d failed=%d',
@@ -560,6 +571,134 @@ final class CliCommand {
 				(int) ( $result['failed'] ?? 0 )
 			)
 		);
+	}
+
+	/**
+	 * Import media ownership from supported offload plugins.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <subcommand>
+	 * : detect, analyze, run, status, or resume.
+	 *
+	 * [--source=<id>]
+	 * : Import source id for analyze/run.
+	 *
+	 * [--profile=<id>]
+	 * : KAZCODE storage profile id for analyze/run.
+	 *
+	 * [--uuid=<uuid>]
+	 * : Import run UUID for status/resume.
+	 *
+	 * [--force-reanalyze]
+	 * : For run, perform a fresh dry-run before starting commit.
+	 *
+	 * @when after_wp_load
+	 *
+	 * @param list<string>         $args Args.
+	 * @param array<string, mixed> $assoc Assoc.
+	 */
+	public function import( array $args, array $assoc ): void {
+		$subcommand = $args[0] ?? 'detect';
+		$imports    = $this->plugin->competitor_imports();
+
+		if ( $subcommand === 'detect' ) {
+			\WP_CLI::line( wp_json_encode( $this->redact_credentials( $imports->detect() ) ) );
+			\WP_CLI::success( 'Import sources detected.' );
+			return;
+		}
+
+		if ( $subcommand === 'analyze' ) {
+			$source     = $this->cli_source( $assoc );
+			$profile_id = $this->cli_profile_id( $assoc );
+			$this->print_import_result( $imports->start_dry_run( $source, $profile_id ), 'Import analysis started.' );
+			return;
+		}
+
+		if ( $subcommand === 'run' ) {
+			$source     = $this->cli_source( $assoc );
+			$profile_id = $this->cli_profile_id( $assoc );
+			$result     = $imports->start_commit( $source, $profile_id );
+			if ( empty( $result['success'] ) && (string) ( $result['code'] ?? '' ) === 'matching_dry_run_required' && isset( $assoc['force-reanalyze'] ) ) {
+				$dry_run = $imports->start_dry_run( $source, $profile_id );
+				if ( empty( $dry_run['success'] ) || empty( $dry_run['uuid'] ) ) {
+					$this->print_import_result( $dry_run, 'Import analysis completed.' );
+					return;
+				}
+				do {
+					$dry_run = $imports->process_next_page( (string) $dry_run['uuid'] );
+				} while ( ! empty( $dry_run['success'] ) && (string) ( $dry_run['status'] ?? '' ) === 'running' );
+				$this->print_import_result( $dry_run, 'Import analysis completed.' );
+				$result = $imports->start_commit( $source, $profile_id );
+			}
+			$this->print_import_result( $result, 'Import commit started.' );
+			return;
+		}
+
+		if ( $subcommand === 'status' ) {
+			$this->print_import_result( $imports->status( $this->cli_uuid( $assoc ) ), 'Import status loaded.' );
+			return;
+		}
+
+		if ( $subcommand === 'resume' ) {
+			$this->print_import_result( $imports->resume( $this->cli_uuid( $assoc ) ), 'Import resumed.' );
+			return;
+		}
+
+		\WP_CLI::error( 'Unknown import subcommand. Use detect, analyze, run, status, or resume.' );
+	}
+
+	/** @param array<string, mixed> $assoc */
+	private function cli_source( array $assoc ): string {
+		$raw       = (string) ( $assoc['source'] ?? '' );
+		$sanitized = sanitize_key( $raw );
+		if ( $sanitized === '' || $sanitized !== $raw ) {
+			\WP_CLI::error( 'Provide a valid --source.' );
+		}
+		return $sanitized;
+	}
+
+	/** @param array<string, mixed> $assoc */
+	private function cli_profile_id( array $assoc ): int {
+		$profile_id = (int) ( $assoc['profile'] ?? 0 );
+		if ( $profile_id <= 0 ) {
+			\WP_CLI::error( 'Provide a valid --profile.' );
+		}
+		return $profile_id;
+	}
+
+	/** @param array<string, mixed> $assoc */
+	private function cli_uuid( array $assoc ): string {
+		$uuid = strtolower( sanitize_text_field( (string) ( $assoc['uuid'] ?? '' ) ) );
+		if ( ! preg_match( '/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/', $uuid ) ) {
+			\WP_CLI::error( 'Provide a valid --uuid.' );
+		}
+		return $uuid;
+	}
+
+	/** @param array<string, mixed> $result */
+	private function print_import_result( array $result, string $success_message ): void {
+		\WP_CLI::line( wp_json_encode( $this->redact_credentials( $result ) ) );
+		if ( ! empty( $result['success'] ) ) {
+			\WP_CLI::success( $success_message );
+			return;
+		}
+		\WP_CLI::error( (string) ( $result['message'] ?? 'Import command failed.' ) );
+	}
+
+	private function redact_credentials( mixed $value ): mixed {
+		if ( ! is_array( $value ) ) {
+			return $value;
+		}
+		$redacted = array();
+		foreach ( $value as $key => $item ) {
+			$key_string = is_string( $key ) ? strtolower( $key ) : '';
+			if ( $key_string !== '' && preg_match( '/(secret|token|credential|access_key|access-key|accesskey)/', $key_string ) ) {
+				continue;
+			}
+			$redacted[ $key ] = $this->redact_credentials( $item );
+		}
+		return $redacted;
 	}
 
 	/**

@@ -17,11 +17,7 @@ use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\AttachmentSyncDeriver;
 use Kazcode\WpStorage\Domain\ManifestBuilder;
 use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
-use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Domain\StorageProfile;
-use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
-use Kazcode\WpStorage\Infrastructure\AttachmentLock;
-use Kazcode\WpStorage\Infrastructure\LeaseLostException;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
@@ -45,11 +41,13 @@ final class ObjectOffloadService {
 		private ?ManifestBuilder $manifest_builder = null,
 		private ?ObjectRepository $objects = null,
 		private ?WpdbStorageProfileRepository $profiles = null,
+		private ?object $transfer_service = null,
 	) {
 		$this->files            = $files ?? new AttachmentFileResolver( $storage->keys() );
 		$this->manifest_builder = $manifest_builder ?? new ManifestBuilder( $this->files );
 		$this->objects          = $objects ?? new ObjectRepository();
 		$this->profiles         = $profiles ?? new WpdbStorageProfileRepository();
+		$this->transfer_service = $transfer_service ?? $this->build_transfer_service();
 	}
 
 	/**
@@ -69,13 +67,7 @@ final class ObjectOffloadService {
 	 * @param array<string, mixed>|null $metadata_override Metadata from WP filter.
 	 * @return array{success:bool,message:string,files?:int,keys?:list<string>,status?:string}
 	 */
-	public function offload(
-		int $attachment_id,
-		?bool $delete_local = null,
-		?array $metadata_override = null,
-		?AttachmentLock $lock = null,
-		?AttachmentLeaseHandle $lease = null,
-	): array {
+	public function offload( int $attachment_id, ?bool $delete_local = null, ?array $metadata_override = null ): array {
 		$profile = $this->resolve_profile();
 		if ( $profile === null || $profile->id === null ) {
 			throw new \RuntimeException( 'No default storage profile configured.' );
@@ -102,37 +94,51 @@ final class ObjectOffloadService {
 
 			$absolute   = $local_files[ $relative ];
 			$object_key = ObjectKeyService::key_for( $profile->prefix, $relative );
-			$row_id     = $this->objects->upsert(
-				array(
-					'attachment_id'       => $attachment_id,
-					'storage_profile_id'  => $profile->id,
-					'local_relative_path' => $relative,
-					'object_key'          => $object_key,
-					'variant_type'        => $item['variant_type'],
-					'local_status'        => 'present',
-					'remote_status'       => ObjectRemoteStatus::UPLOADING,
-					'attempt_count'       => 1,
-				)
-			);
 
 			try {
 				$size = (int) filesize( $absolute );
-				$this->storage->upload_file_to_key( $absolute, $object_key, $relative );
-
 				$head = $this->storage->head_key( $object_key );
-				$observation = RemoteObservation::from_head_result( $head, $size );
-				if ( ! $observation->is_size_verified() ) {
-					$reason = match ( $observation->verification_level ) {
-						RemoteObservation::SIZE_MISMATCH => 'remote size mismatch',
-						RemoteObservation::NOT_VERIFIED => $observation->is_confirmed_missing() ? 'remote confirmed missing' : 'remote status unknown',
-						default => 'remote size not verified',
-					};
-					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by AttachmentOffloader, redacted/truncated (safe_error_message()), and the one place it reaches HTML (AttachmentDetailsPanel.php) already wraps it in esc_html().
-					throw new \RuntimeException( 'Verification failed after upload for ' . $relative . ': ' . $reason );
+				if ( ! $this->head_matches_expected_size( $head, $size ) ) {
+					$this->objects->upsert(
+						array(
+							'attachment_id'       => $attachment_id,
+							'storage_profile_id'  => $profile->id,
+							'local_relative_path' => $relative,
+							'object_key'          => $object_key,
+							'variant_type'        => $item['variant_type'],
+							'local_status'        => 'present',
+							'remote_status'       => ObjectRemoteStatus::UPLOADING,
+							'attempt_count'       => 1,
+						)
+					);
+
+					$result = $this->transfer_service->upload_local(
+						$attachment_id,
+						$profile->id,
+						$relative,
+						$object_key,
+						$this->storage->content_type_for_local_file( $absolute, $relative ),
+						(string) $this->settings->get( 'cache_control', 'public, max-age=31536000' )
+					);
+					if ( empty( $result['verified_complete'] ) ) {
+						$msg = (string) ( $result['message'] ?? 'Transfer remains incomplete.' );
+						$this->objects->upsert(
+							array(
+								'attachment_id'       => $attachment_id,
+								'storage_profile_id'  => $profile->id,
+								'local_relative_path' => $relative,
+								'object_key'          => $object_key,
+								'variant_type'        => $item['variant_type'],
+								'remote_status'       => ObjectRemoteStatus::UPLOADING,
+								'last_error_message'  => $msg,
+							)
+						);
+						$failures[] = $relative . ': ' . $msg;
+						continue;
+					}
 				}
 
 				$now = gmdate( 'Y-m-d H:i:s' );
-				$this->renew_or_abort( $lock, $lease, 'object inventory commit' );
 				$this->objects->upsert(
 					array(
 						'attachment_id'       => $attachment_id,
@@ -149,11 +155,8 @@ final class ObjectOffloadService {
 					)
 				);
 				$uploaded_keys[] = $object_key;
-			} catch ( LeaseLostException $e ) {
-				throw $e;
 			} catch ( \Throwable $e ) {
 				$msg = $this->safe_error_message( $e );
-				$this->renew_or_abort( $lock, $lease, 'object failure commit' );
 				$this->objects->upsert(
 					array(
 						'attachment_id'       => $attachment_id,
@@ -171,7 +174,6 @@ final class ObjectOffloadService {
 
 		$rows   = $this->objects->find_by_attachment( $attachment_id );
 		$status = AttachmentSyncDeriver::derive_status( $rows );
-		$this->renew_or_abort( $lock, $lease, 'attachment sync metadata commit' );
 		$this->sync_attachment_meta( $attachment_id, $rows, $status );
 
 		if ( $status === AttachmentOffloader::STATUS_OFFLOADED ) {
@@ -186,15 +188,12 @@ final class ObjectOffloadService {
 					)
 				);
 			} else {
-				$this->renew_or_abort( $lock, $lease, 'local cleanup' );
 				$cleanup = ( new CleanupLocalFiles( $this->settings, $this->storage ) )->maybe_cleanup(
 					$attachment_id,
 					$local_files,
 					$manifest->items(),
 					$delete_local,
-					$profile->prefix,
-					$lock,
-					$lease
+					$profile->prefix
 				);
 				if ( $cleanup['skipped'] && str_contains( $cleanup['message'], 'verify failure' ) ) {
 					return array(
@@ -234,22 +233,25 @@ final class ObjectOffloadService {
 		throw new \RuntimeException( $message );
 	}
 
-	private function renew_or_abort( ?AttachmentLock $lock, ?AttachmentLeaseHandle $lease, string $stage ): void {
-		if ( $lock === null || $lease === null ) {
-			return;
-		}
-		if ( ! $lock->renew( $lease ) ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $stage is an internal fixed call-site label, then redacted/truncated by AttachmentOffloader::safe_error_message() before UI display.
-			throw new LeaseLostException( 'Attachment operation ownership lost before ' . $stage . '.' );
-		}
-	}
-
 	private function resolve_profile(): ?StorageProfile {
 		$profile = $this->profiles->find_default_upload_target();
 		if ( $profile !== null ) {
 			return $profile;
 		}
 		return ( new LegacyProfileMigrator( $this->settings, $this->profiles ) )->ensure_legacy_profile();
+	}
+
+	private function build_transfer_service(): ResumableTransferService {
+		return Plugin::instance()->resumable_transfers();
+	}
+
+	/**
+	 * @param array<string, mixed> $head HEAD result from storage.
+	 */
+	private function head_matches_expected_size( array $head, int $expected_size ): bool {
+		return ! empty( $head['exists'] )
+			&& isset( $head['content_length'] )
+			&& (int) $head['content_length'] === $expected_size;
 	}
 
 	/**

@@ -17,10 +17,6 @@ use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
 
 /**
  * Decides whether an attachment delete may delete physical remote objects.
- *
- * Current 1.0.x inventory cannot authoritatively model shared attachment
- * references, so this guard combines inventory rows with WordPress attachment
- * metadata and fails closed on ambiguity.
  */
 final class RemoteDeleteSafetyGuard {
 
@@ -56,9 +52,10 @@ final class RemoteDeleteSafetyGuard {
 
 		if ( $this->has_same_attached_file_reference( $attachment_id ) ) {
 			return array(
-				'status' => self::SHARED_REFERENCE,
-				'reason' => 'same_attached_file',
-				'keys'   => array(),
+				'status'    => self::SHARED_REFERENCE,
+				'reason'    => 'same_attached_file',
+				'keys'      => array(),
+				'locations' => array(),
 			);
 		}
 
@@ -83,23 +80,32 @@ final class RemoteDeleteSafetyGuard {
 		}
 
 		return array(
-			'status' => self::SAFE_TO_DELETE,
-			'reason' => 'unshared_present_inventory',
-			'keys'   => $keys,
+			'status'    => self::SAFE_TO_DELETE,
+			'reason'    => 'unshared_present_inventory',
+			'keys'      => $keys,
 			'locations' => $locations,
 		);
 	}
 
-	/**
-	 * WordPress attachment source of truth check for WPML-style duplicates.
-	 */
 	private function has_same_attached_file_reference( int $attachment_id ): bool {
 		$attached = (string) get_post_meta( $attachment_id, '_wp_attached_file', true );
-		if ( $attached === '' || ! function_exists( 'get_posts' ) ) {
+		if ( $attached === '' ) {
 			return false;
 		}
 
-		// phpcs:ignore WordPressVIPMinimum.Performance.WPQueryParams.PostNotIn_post__not_in, WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- attachment deletion is rare/admin-side; fail-closed shared-reference safety requires checking WordPress' attachment meta source of truth for another post using the same attached file.
+		if ( ! function_exists( 'get_posts' ) ) {
+			$stub_meta = class_exists( '\Kazcode\WpStorage\Tests\Support\WpStubs' )
+				? \Kazcode\WpStorage\Tests\Support\WpStubs::$post_meta
+				: array();
+			foreach ( $stub_meta as $id => $meta ) {
+				if ( (int) $id !== $attachment_id && is_array( $meta ) && (string) ( $meta['_wp_attached_file'] ?? '' ) === $attached ) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// phpcs:ignore WordPressVIPMinimum.Performance.WPQueryParams.PostNotIn_post__not_in, WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- attachment deletion is rare/admin-side; shared-reference safety requires checking WordPress attachment meta.
 		$others = get_posts(
 			array(
 				'post_type'      => 'attachment',

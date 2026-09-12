@@ -226,10 +226,10 @@ final class AttachmentRestorer {
 				);
 			}
 
-			if ($unknown > 0) {
+			if ($unknown > 0 || $missing > 0) {
 				return array(
 					'success' => false,
-					'message' => 'Restore incomplete; some remote objects could not be verified.',
+					'message' => 'Restore incomplete; some remote objects could not be restored.',
 					'files'   => $count,
 					'status'  => 'partial',
 				);
@@ -240,15 +240,6 @@ final class AttachmentRestorer {
 					'success' => false,
 					'message' => 'Nothing restored; remote objects missing or paths invalid.',
 					'files'   => 0,
-				);
-			}
-
-			if ($missing > 0) {
-				return array(
-					'success' => false,
-					'message' => 'Restore incomplete; some remote objects are missing or paths invalid.',
-					'files'   => $count,
-					'status'  => 'partial',
 				);
 			}
 

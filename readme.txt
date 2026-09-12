@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: 1.0.1
+Stable tag: 1.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -18,6 +18,8 @@ KAZCODE Universal Storage moves your Media Library's binary files — originals 
 * A storage profile with admin CRUD and profile-scoped delivery URLs
 * Dashboard, Media, Storage, Migration, Health, and Logs admin screens
 * Migrate, verify, restore, adopt-existing, health scan, and repair tools
+* Safe import from WP Offload Media and Advanced Media Offloader: mandatory dry-run, exact-key verification, no credential copying, and no competitor data changes
+* Crash-resumable multipart uploads for large local files; destination verification always precedes local cleanup
 * Provider presets (AWS, Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2)
 * WP-CLI, REST batch APIs, and resumable background jobs
 * Optional Pro add-on for multiple storage profiles, cross-provider migration wizard, orphan scan, and advanced health tools — a separate plugin, not a trial or license key on this one
@@ -43,7 +45,7 @@ AWS S3 and S3-compatible APIs (R2, Spaces, MinIO, Wasabi, B2, generic endpoint).
 
 = What's the difference between Free and Pro? =
 
-Free (this plugin) is a complete, non-trial product: automatic offload, migrate, verify, retry, restore, one storage profile, and full native Media Library integration. The separate Pro add-on unlocks multiple storage profiles with independent credentials, cross-provider/cross-bucket migration with verify-before-switch, orphan scan, advanced health, and multisite network defaults. Deactivating Pro never deletes data or breaks media that's already being served.
+Free (this plugin) is a complete, non-trial product: automatic offload, migrate, verify, retry, restore, safe imports from WP Offload Media and Advanced Media Offloader, crash-resumable local multipart uploads, one storage profile, and full native Media Library integration. The separate Pro add-on unlocks multiple storage profiles with independent credentials, cross-provider/cross-bucket migration with verify-before-switch and the shared resumable engine, orphan scan, advanced health, and multisite network defaults. Deactivating Pro never deletes data or breaks media that's already being served.
 
 = Does this plugin connect to any external service? =
 
@@ -61,13 +63,11 @@ Full documentation — installation, storage-provider setup, migration, restore,
 
 Use this plugin's WordPress.org support forum first. For direct contact, see https://kazcode.net/universal-storage/support/ or reach KAZCODE at kazmij@gmail.com.
 
-== External Services ==
+== External services ==
 
-KAZCODE Universal Storage connects only to object-storage services explicitly selected and configured by the site administrator. It does not send media, credentials, telemetry, or site data to any KAZCODE-owned service, and KAZCODE does not proxy your media through its own servers.
+KAZCODE Universal Storage connects only to object-storage services explicitly configured by the site administrator. It does not send media, credentials, telemetry, or site data to any KAZCODE-owned service.
 
-The plugin can connect to Amazon S3, Cloudflare R2, DigitalOcean Spaces, Wasabi, Backblaze B2 through its S3-compatible API, MinIO, or another administrator-supplied S3-compatible endpoint. An account with the selected storage provider may be required. Connections occur only when the administrator configures or tests storage, or uses storage operations such as upload/offload, download/restore, HEAD/verification, migration/adoption of existing objects, or remote delete when that behavior is configured.
-
-Media files and storage API requests move directly between this WordPress site and the administrator-selected storage provider. Credentials are used only to authenticate to the configured storage provider and are not sent to KAZCODE servers. Data sent to the configured provider can include media/object binary data, object keys and paths, and metadata or protocol fields required by the S3-compatible API.
+The plugin can connect to Amazon S3, Cloudflare R2, DigitalOcean Spaces, Wasabi, Backblaze B2, MinIO, or another administrator-supplied S3-compatible endpoint. Connections occur only when the administrator configures/tests storage, or uses offload, verify, restore, migrate/adopt, or remote-delete functionality.
 
 Amazon S3 — https://aws.amazon.com/s3/
 Customer Agreement: https://aws.amazon.com/agreement/ — Privacy: https://aws.amazon.com/privacy/
@@ -105,16 +105,11 @@ Release builds use Composer and PHP-Scoper (third-party dependencies are namespa
 
 == Changelog ==
 
-= 1.0.1 =
-* Strengthened remote verification before local media cleanup.
-* Improved recovery behavior during transient storage-provider failures.
-* Hardened shared-media and multi-profile object handling.
-* Fixed remote-only media compatibility with WordPress editor and REST workflows.
-* Improved restore and partial-failure safety.
-* Hardened concurrent attachment operations against stale workers.
-* Fixed Amazon S3 preset handling so stale custom endpoint settings cannot be reused for AWS connections.
-* Added a global admin control to disable onboarding tutorials across plugin screens.
-* Improved Composer and AWS SDK dependency isolation for compatibility with other plugins and Composer-based WordPress installations.
+= 1.1.0 =
+* Safe, read-only imports from WP Offload Media and Advanced Media Offloader. A mandatory dry-run verifies exact source keys before import; credentials are never copied and competitor data is never changed.
+* Crash-resumable multipart transfers for large local uploads, with durable sessions, provider part reconciliation, and destination verification before any destructive local cleanup.
+* Shared resumable transfer infrastructure for Pro cross-provider migration; source URLs remain authoritative until the verified destination is committed.
+* Import and transfer-session recovery state is preserved by default on uninstall and removed only by the existing opt-in purge setting.
 
 = 1.0.0 =
 * First public release
@@ -127,8 +122,8 @@ Release builds use Composer and PHP-Scoper (third-party dependencies are namespa
 
 == Upgrade Notice ==
 
-= 1.0.1 =
-Reliability, data-integrity, and compatibility hotfix. Update recommended for all sites.
+= 1.1.0 =
+Adds safe competitor import and crash-resumable multipart transfer state. Existing media inventory and profiles are preserved; no competitor credentials or metadata are copied or modified.
 
 = 1.0.0 =
 First public release. Requires PHP 8.3+.

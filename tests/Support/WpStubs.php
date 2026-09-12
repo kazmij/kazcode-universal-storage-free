@@ -26,15 +26,6 @@ final class WpStubs {
 	/** @var array<string, mixed> */
 	public static array $site_options = array();
 
-	/** @var array<int, array<string, mixed>> */
-	public static array $user_meta = array();
-
-	/** @var array<string, bool> */
-	public static array $scripts = array();
-
-	/** @var array<string, list<string>> */
-	public static array $inline_scripts = array();
-
 	/** @var bool */
 	public static bool $is_multisite = false;
 
@@ -53,9 +44,6 @@ final class WpStubs {
 	/** @var string */
 	public static string $current_user_login = '';
 
-	/** @var array<string, bool> */
-	public static array $current_user_caps = array();
-
 	/**
 	 * Reset between tests.
 	 */
@@ -64,16 +52,12 @@ final class WpStubs {
 		self::$posts              = array();
 		self::$options            = array();
 		self::$site_options       = array();
-		self::$user_meta          = array();
-		self::$scripts            = array();
-		self::$inline_scripts     = array();
 		self::$is_multisite       = false;
 		self::$deleted_files      = array();
 		self::$scheduled_hooks    = array();
 		self::$uploads_basedir    = '';
 		self::$current_user_id    = 0;
 		self::$current_user_login = '';
-		self::$current_user_caps  = array();
 		// Full reset, not an allowlist of hook names — every add_filter()/
 		// add_action() call in a test must not leak into the next one.
 		if ( isset( $GLOBALS['s3ms_test_filters'] ) ) {

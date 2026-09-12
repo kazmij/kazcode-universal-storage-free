@@ -11,17 +11,12 @@ namespace Kazcode\WpStorage\Storage;
 
 defined( 'ABSPATH' ) || exit;
 
-use Aws\S3\MultipartUploader;
-use Aws\Exception\MultipartUploadException;
 use Kazcode\WpStorage\Core\Settings;
-use Kazcode\WpStorage\Domain\RemoteObservation;
 
 /**
  * Put / Head / Delete wrappers. ACL is never set (bucket-owner-enforced friendly).
  */
-final class S3Storage {
-
-	private const MULTIPART_THRESHOLD = 104857600; // 100 MiB
+final class S3Storage implements StorageGatewayInterface {
 
 	private S3ClientFactory $factory;
 	private S3KeyResolver $keys;
@@ -57,6 +52,10 @@ final class S3Storage {
 		return $this->urls;
 	}
 
+	public function profile_id(): int {
+		return 0;
+	}
+
 	/**
 	 * Lazy S3 client.
 	 *
@@ -74,6 +73,138 @@ final class S3Storage {
 	 */
 	public function bucket(): string {
 		return (string) $this->settings->get('bucket', '');
+	}
+
+	public function put_object_from_file( string $key, string $local_path, string $content_type, string $cache_control ): void {
+		$params = array(
+			'Bucket'      => $this->bucket(),
+			'Key'         => $key,
+			'SourceFile'  => $local_path,
+			'ContentType' => $content_type !== '' ? $content_type : 'application/octet-stream',
+		);
+		if ( $cache_control !== '' ) {
+			$params['CacheControl'] = $cache_control;
+		}
+
+		$this->client()->putObject( $params );
+	}
+
+	public function create_multipart_upload( string $key, string $content_type, string $cache_control ): string {
+		$params = array(
+			'Bucket'      => $this->bucket(),
+			'Key'         => $key,
+			'ContentType' => $content_type !== '' ? $content_type : 'application/octet-stream',
+		);
+		if ( $cache_control !== '' ) {
+			$params['CacheControl'] = $cache_control;
+		}
+
+		$result = $this->client()->createMultipartUpload( $params );
+		return (string) $result->get( 'UploadId' );
+	}
+
+	public function upload_part( string $key, string $upload_id, int $part_number, $body, int $content_length ): string {
+		$result = $this->client()->uploadPart(
+			array(
+				'Bucket'        => $this->bucket(),
+				'Key'           => $key,
+				'UploadId'      => $upload_id,
+				'PartNumber'    => $part_number,
+				'Body'          => $body,
+				'ContentLength' => $content_length,
+			)
+		);
+		return $this->normalize_etag( (string) $result->get( 'ETag' ) );
+	}
+
+	/**
+	 * @return array<int,array{etag:string,size:int}>
+	 */
+	public function list_parts( string $key, string $upload_id ): array {
+		$parts  = array();
+		$marker = null;
+
+		do {
+			$params = array(
+				'Bucket'   => $this->bucket(),
+				'Key'      => $key,
+				'UploadId' => $upload_id,
+			);
+			if ( $marker !== null ) {
+				$params['PartNumberMarker'] = $marker;
+			}
+
+			$result = $this->client()->listParts( $params );
+			foreach ( $result->get( 'Parts' ) ?? array() as $part ) {
+				$part_number = (int) ( $part['PartNumber'] ?? 0 );
+				if ( $part_number <= 0 ) {
+					continue;
+				}
+				$parts[ $part_number ] = array(
+					'etag' => $this->normalize_etag( (string) ( $part['ETag'] ?? '' ) ),
+					'size' => (int) ( $part['Size'] ?? 0 ),
+				);
+			}
+
+			$is_truncated = (bool) ( $result->get( 'IsTruncated' ) ?? false );
+			$next_marker  = $result->get( 'NextPartNumberMarker' );
+			$marker       = $is_truncated ? (int) $next_marker : null;
+		} while ( $is_truncated && $marker !== null && $marker > 0 );
+
+		ksort( $parts );
+		return $parts;
+	}
+
+	/**
+	 * @param array<int,array{etag:string,size?:int}> $parts
+	 */
+	public function complete_multipart_upload( string $key, string $upload_id, array $parts ): void {
+		ksort( $parts );
+		$complete_parts = array();
+		foreach ( $parts as $part_number => $part ) {
+			$complete_parts[] = array(
+				'PartNumber' => (int) $part_number,
+				'ETag'       => (string) $part['etag'],
+			);
+		}
+
+		$this->client()->completeMultipartUpload(
+			array(
+				'Bucket'          => $this->bucket(),
+				'Key'             => $key,
+				'UploadId'        => $upload_id,
+				'MultipartUpload' => array(
+					'Parts' => $complete_parts,
+				),
+			)
+		);
+	}
+
+	public function abort_multipart_upload( string $key, string $upload_id ): void {
+		try {
+			$this->client()->abortMultipartUpload(
+				array(
+					'Bucket'   => $this->bucket(),
+					'Key'      => $key,
+					'UploadId' => $upload_id,
+				)
+			);
+		} catch ( \Throwable $e ) {
+			if ( ! $this->is_missing_multipart_upload_error( $e ) ) {
+				throw $e;
+			}
+		}
+	}
+
+	public function get_range( string $key, int $start, int $end ) {
+		$result = $this->client()->getObject(
+			array(
+				'Bucket' => $this->bucket(),
+				'Key'    => $key,
+				'Range'  => 'bytes=' . $start . '-' . $end,
+			)
+		);
+		return $result['Body'];
 	}
 
 	/**
@@ -101,47 +232,20 @@ final class S3Storage {
 			throw new \RuntimeException('Local file is not readable.');
 		}
 
-		$content_type = $this->detect_mime($local_path, $relative);
+		$content_type = $this->content_type_for_local_file($local_path, $relative);
 		$cache        = (string) $this->settings->get('cache_control', 'public, max-age=31536000');
-		$size         = (int) filesize($local_path);
+		$this->put_object_from_file( $key, $local_path, $content_type, $cache );
+	}
 
-		if ($size >= self::MULTIPART_THRESHOLD) {
-			$uploader = new MultipartUploader(
-				$this->client(),
-				$local_path,
-				array(
-					'bucket' => $this->bucket(),
-					'key'    => $key,
-					'params' => array(
-						'ContentType'  => $content_type,
-						'CacheControl' => $cache,
-					),
-				)
-			);
-			try {
-				$uploader->upload();
-			} catch (MultipartUploadException $e) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by ObjectOffloadService/AttachmentOffloader, redacted/truncated, and the one place it reaches HTML already uses esc_html().
-				throw new \RuntimeException('Multipart upload failed: ' . $e->getMessage(), 0, $e);
-			}
-		} else {
-			$this->client()->putObject(
-				array(
-					'Bucket'       => $this->bucket(),
-					'Key'          => $key,
-					'SourceFile'   => $local_path,
-					'ContentType'  => $content_type,
-					'CacheControl' => $cache,
-				)
-			);
-		}
+	public function content_type_for_local_file( string $local_path, string $relative ): string {
+		return $this->detect_mime( $local_path, $relative );
 	}
 
 	/**
 	 * HEAD object by relative path.
 	 *
 	 * @param string $relative Relative uploads path.
-	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,error_class?:string,remote_status?:string,verification_level?:string,content_length?:int,content_type?:string}
+	 * @return array{exists:bool,content_length?:int,content_type?:string}
 	 */
 	public function head_relative(string $relative): array {
 		return $this->head_key($this->keys->resolve($relative));
@@ -157,7 +261,7 @@ final class S3Storage {
 	 * object as remotely missing, or a transient error gets written as data loss.
 	 *
 	 * @param string $key S3 key.
-	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,error_class?:string,remote_status?:string,verification_level?:string,content_length?:int,content_type?:string}
+	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,content_length?:int,content_type?:string,etag?:string}
 	 */
 	public function head_key(string $key): array {
 		try {
@@ -168,26 +272,21 @@ final class S3Storage {
 				)
 			);
 			return array(
-				'exists'             => true,
-				'remote_status'      => RemoteObservation::REMOTE_PRESENT,
-				'verification_level' => RemoteObservation::EXISTS_VERIFIED,
-				'content_length'     => (int) $result->get('ContentLength'),
-				'content_type'       => (string) $result->get('ContentType'),
+				'exists'          => true,
+				'content_length'  => (int) $result->get('ContentLength'),
+				'content_type'    => (string) $result->get('ContentType'),
+				'etag'            => $this->normalize_etag( (string) $result->get( 'ETag' ) ),
 			);
 		} catch (\Throwable $e) {
 			$confirmed_missing = $this->is_missing_object_error($e);
-			$error_class       = $confirmed_missing ? '' : RemoteObservation::classify_exception($e);
 			if (!$confirmed_missing && defined('WP_DEBUG') && WP_DEBUG) {
 				// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				error_log('KAZCODE Universal Storage head_key transient error for key ' . $key . ' (' . $error_class . ')');
+				error_log('KAZCODE Universal Storage head_key transient error for key ' . $key . ': ' . $e->getMessage());
 			}
 			return array(
-				'exists'             => false,
-				'confirmed_missing'  => $confirmed_missing,
-				'remote_status'      => $confirmed_missing ? RemoteObservation::REMOTE_CONFIRMED_MISSING : RemoteObservation::REMOTE_UNKNOWN,
-				'verification_level' => RemoteObservation::NOT_VERIFIED,
-				'error_class'        => $error_class,
-				'error'              => $confirmed_missing ? '' : $e->getMessage(),
+				'exists'            => false,
+				'confirmed_missing' => $confirmed_missing,
+				'error'             => $confirmed_missing ? '' : $e->getMessage(),
 			);
 		}
 	}
@@ -271,7 +370,7 @@ final class S3Storage {
 		}
 
 		try {
-			$result = $this->client()->deleteObjects(
+			$this->client()->deleteObjects(
 				array(
 					'Bucket' => $this->bucket(),
 					'Delete' => array(
@@ -280,39 +379,14 @@ final class S3Storage {
 					),
 				)
 			);
-			$errors = $this->delete_errors_from_result( $result );
-			if ( $errors !== array() ) {
-				throw new \RuntimeException( 'Batch delete partial failure for ' . count( $errors ) . ' object(s).' );
-			}
 			return true;
 		} catch (\Throwable $e) {
-			if ( str_starts_with( $e->getMessage(), 'Batch delete partial failure' ) ) {
-				throw $e;
-			}
 			if ($this->should_fallback_to_single_delete($e)) {
 				return false;
 			}
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- callers catch \Throwable generically and never echo the raw message as HTML; message itself is a static string with no interpolation.
 			throw new \RuntimeException('Batch delete failed.', 0, $e);
 		}
-	}
-
-	/**
-	 * @return list<array<string, mixed>>
-	 */
-	private function delete_errors_from_result( mixed $result ): array {
-		$errors = null;
-		if ( is_array( $result ) ) {
-			$errors = $result['Errors'] ?? null;
-		} elseif ( is_object( $result ) ) {
-			if ( method_exists( $result, 'get' ) ) {
-				$errors = $result->get( 'Errors' );
-			} elseif ( isset( $result->Errors ) ) {
-				$errors = $result->Errors;
-			}
-		}
-
-		return is_array( $errors ) ? array_values( $errors ) : array();
 	}
 
 	private function should_fallback_to_single_delete(\Throwable $e): bool {
@@ -326,11 +400,27 @@ final class S3Storage {
 
 	private function is_missing_object_error(\Throwable $e): bool {
 		$code = method_exists($e, 'getAwsErrorCode') ? (string) $e->getAwsErrorCode() : '';
-		if (in_array($code, array('NoSuchKey', 'NotFound', '404'), true)) {
+		if (method_exists($e, 'getStatusCode') && (int) $e->getStatusCode() === 404) {
 			return true;
 		}
-		$msg = strtolower($e->getMessage());
-		return str_contains($msg, 'nosuchkey') || str_contains($msg, 'not found');
+		return in_array($code, array('NoSuchKey', 'NotFound', '404'), true);
+	}
+
+	private function is_missing_multipart_upload_error( \Throwable $e ): bool {
+		$code = method_exists( $e, 'getAwsErrorCode' ) ? (string) $e->getAwsErrorCode() : '';
+		if ( $code === 'NoSuchUpload' ) {
+			return true;
+		}
+		$msg = strtolower( $e->getMessage() );
+		return str_contains( $msg, 'nosuchupload' )
+			|| str_contains( $msg, 'no such upload' );
+	}
+
+	private function normalize_etag( string $etag ): string {
+		if ( strlen( $etag ) >= 2 && $etag[0] === '"' && $etag[ strlen( $etag ) - 1 ] === '"' ) {
+			return substr( $etag, 1, -1 );
+		}
+		return $etag;
 	}
 
 	/**

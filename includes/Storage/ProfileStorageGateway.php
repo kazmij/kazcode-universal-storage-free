@@ -12,13 +12,12 @@ namespace Kazcode\WpStorage\Storage;
 defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\Settings;
-use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Domain\StorageProfile;
 
 /**
  * Low-level Put/Head/Get/Copy/Delete for one storage profile.
  */
-final class ProfileStorageGateway {
+final class ProfileStorageGateway implements StorageGatewayInterface {
 
 	/** @var \Aws\S3\S3Client|null */
 	private $client = null;
@@ -31,6 +30,10 @@ final class ProfileStorageGateway {
 
 	public function profile(): StorageProfile {
 		return $this->profile;
+	}
+
+	public function profile_id(): int {
+		return (int) ( $this->profile->id ?? 0 );
 	}
 
 	/**
@@ -47,11 +50,163 @@ final class ProfileStorageGateway {
 		return $this->profile->bucket;
 	}
 
+	public function put_object_from_file( string $key, string $local_path, string $content_type, string $cache_control ): void {
+		$params = array(
+			'Bucket'      => $this->bucket(),
+			'Key'         => $key,
+			'SourceFile'  => $local_path,
+			'ContentType' => $content_type !== '' ? $content_type : 'application/octet-stream',
+		);
+		if ( $cache_control !== '' ) {
+			$params['CacheControl'] = $cache_control;
+		}
+
+		$this->client()->putObject( $params );
+	}
+
+	public function upload_file_to_key( string $local_path, string $key, string $relative = '' ): void {
+		unset( $relative );
+		$this->put_object_from_file( $key, $local_path, $this->content_type_for_local_file( $local_path ), (string) $this->settings->get( 'cache_control', 'public, max-age=31536000' ) );
+	}
+
+	public function presigned_url_for_key( string $key, int $ttl_seconds ): string {
+		if ( $key === '' ) {
+			return '';
+		}
+		$ttl_seconds = max( 60, min( 604800, $ttl_seconds ) );
+		$command = $this->client()->getCommand(
+			'GetObject',
+			array(
+				'Bucket' => $this->bucket(),
+				'Key'    => $key,
+			)
+		);
+		return (string) $this->client()->createPresignedRequest( $command, '+' . $ttl_seconds . ' seconds' )->getUri();
+	}
+
+	public function create_multipart_upload( string $key, string $content_type, string $cache_control ): string {
+		$params = array(
+			'Bucket'      => $this->bucket(),
+			'Key'         => $key,
+			'ContentType' => $content_type !== '' ? $content_type : 'application/octet-stream',
+		);
+		if ( $cache_control !== '' ) {
+			$params['CacheControl'] = $cache_control;
+		}
+
+		$result = $this->client()->createMultipartUpload( $params );
+		return (string) $result->get( 'UploadId' );
+	}
+
+	public function upload_part( string $key, string $upload_id, int $part_number, $body, int $content_length ): string {
+		$result = $this->client()->uploadPart(
+			array(
+				'Bucket'        => $this->bucket(),
+				'Key'           => $key,
+				'UploadId'      => $upload_id,
+				'PartNumber'    => $part_number,
+				'Body'          => $body,
+				'ContentLength' => $content_length,
+			)
+		);
+		return $this->normalize_etag( (string) $result->get( 'ETag' ) );
+	}
+
+	/**
+	 * @return array<int,array{etag:string,size:int}>
+	 */
+	public function list_parts( string $key, string $upload_id ): array {
+		$parts  = array();
+		$marker = null;
+
+		do {
+			$params = array(
+				'Bucket'   => $this->bucket(),
+				'Key'      => $key,
+				'UploadId' => $upload_id,
+			);
+			if ( $marker !== null ) {
+				$params['PartNumberMarker'] = $marker;
+			}
+
+			$result = $this->client()->listParts( $params );
+			foreach ( $result->get( 'Parts' ) ?? array() as $part ) {
+				$part_number = (int) ( $part['PartNumber'] ?? 0 );
+				if ( $part_number <= 0 ) {
+					continue;
+				}
+				$parts[ $part_number ] = array(
+					'etag' => $this->normalize_etag( (string) ( $part['ETag'] ?? '' ) ),
+					'size' => (int) ( $part['Size'] ?? 0 ),
+				);
+			}
+
+			$is_truncated = (bool) ( $result->get( 'IsTruncated' ) ?? false );
+			$next_marker  = $result->get( 'NextPartNumberMarker' );
+			$marker       = $is_truncated ? (int) $next_marker : null;
+		} while ( $is_truncated && $marker !== null && $marker > 0 );
+
+		ksort( $parts );
+		return $parts;
+	}
+
+	/**
+	 * @param array<int,array{etag:string,size?:int}> $parts
+	 */
+	public function complete_multipart_upload( string $key, string $upload_id, array $parts ): void {
+		ksort( $parts );
+		$complete_parts = array();
+		foreach ( $parts as $part_number => $part ) {
+			$complete_parts[] = array(
+				'PartNumber' => (int) $part_number,
+				'ETag'       => (string) $part['etag'],
+			);
+		}
+
+		$this->client()->completeMultipartUpload(
+			array(
+				'Bucket'          => $this->bucket(),
+				'Key'             => $key,
+				'UploadId'        => $upload_id,
+				'MultipartUpload' => array(
+					'Parts' => $complete_parts,
+				),
+			)
+		);
+	}
+
+	public function abort_multipart_upload( string $key, string $upload_id ): void {
+		try {
+			$this->client()->abortMultipartUpload(
+				array(
+					'Bucket'   => $this->bucket(),
+					'Key'      => $key,
+					'UploadId' => $upload_id,
+				)
+			);
+		} catch ( \Throwable $e ) {
+			if ( ! $this->is_missing_multipart_upload_error( $e ) ) {
+				throw $e;
+			}
+		}
+	}
+
+	public function get_range( string $key, int $start, int $end ) {
+		$result = $this->client()->getObject(
+			array(
+				'Bucket' => $this->bucket(),
+				'Key'    => $key,
+				'Range'  => 'bytes=' . $start . '-' . $end,
+			)
+		);
+		return $result['Body'];
+	}
+
 	/**
 	 * `confirmed_missing` is true only for a definitive 404/NoSuchKey response — see
 	 * S3Storage::head_key() for why callers that persist inventory state must check it.
 	 *
-	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,error_class?:string,remote_status?:string,verification_level?:string,content_length?:int,content_type?:string}
+	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,content_length?:int,content_type?:string,etag?:string}
 	 */
 	public function head_key( string $key ): array {
 		try {
@@ -62,26 +217,21 @@ final class ProfileStorageGateway {
 				)
 			);
 			return array(
-				'exists'             => true,
-				'remote_status'      => RemoteObservation::REMOTE_PRESENT,
-				'verification_level' => RemoteObservation::EXISTS_VERIFIED,
-				'content_length'     => (int) $result->get( 'ContentLength' ),
-				'content_type'       => (string) $result->get( 'ContentType' ),
+				'exists'         => true,
+				'content_length' => (int) $result->get( 'ContentLength' ),
+				'content_type'   => (string) $result->get( 'ContentType' ),
+				'etag'           => $this->normalize_etag( (string) $result->get( 'ETag' ) ),
 			);
 		} catch ( \Throwable $e ) {
 			$confirmed_missing = $this->is_missing_object_error( $e );
-			$error_class       = $confirmed_missing ? '' : RemoteObservation::classify_exception( $e );
 			if ( ! $confirmed_missing && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 				// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				error_log( 'KAZCODE Universal Storage head_key transient error for key ' . $key . ' (' . $error_class . ')' );
+				error_log( 'KAZCODE Universal Storage head_key transient error for key ' . $key . ': ' . $e->getMessage() );
 			}
 			return array(
-				'exists'             => false,
-				'confirmed_missing'  => $confirmed_missing,
-				'remote_status'      => $confirmed_missing ? RemoteObservation::REMOTE_CONFIRMED_MISSING : RemoteObservation::REMOTE_UNKNOWN,
-				'verification_level' => RemoteObservation::NOT_VERIFIED,
-				'error_class'        => $error_class,
-				'error'              => $confirmed_missing ? '' : $e->getMessage(),
+				'exists'            => false,
+				'confirmed_missing' => $confirmed_missing,
+				'error'             => $confirmed_missing ? '' : $e->getMessage(),
 			);
 		}
 	}
@@ -125,30 +275,6 @@ final class ProfileStorageGateway {
 		);
 	}
 
-	public function upload_file_to_key( string $local_path, string $key, string $relative ): void {
-		if ( ! is_readable( $local_path ) ) {
-			throw new \RuntimeException( 'Local file is not readable.' );
-		}
-
-		$content_type = 'application/octet-stream';
-		if ( function_exists( 'wp_check_filetype' ) ) {
-			$check = wp_check_filetype( $relative );
-			if ( ! empty( $check['type'] ) ) {
-				$content_type = (string) $check['type'];
-			}
-		}
-
-		$this->client()->putObject(
-			array(
-				'Bucket'       => $this->bucket(),
-				'Key'          => $key,
-				'SourceFile'   => $local_path,
-				'ContentType'  => $content_type,
-				'CacheControl' => (string) $this->settings->get( 'cache_control', 'public, max-age=31536000' ),
-			)
-		);
-	}
-
 	public function delete_key( string $key ): void {
 		if ( $key === '' ) {
 			return;
@@ -168,40 +294,44 @@ final class ProfileStorageGateway {
 		}
 	}
 
-	public function download_key_to_local( string $key, string $local_path ): void {
-		$dir = dirname( $local_path );
-		if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
-			throw new \RuntimeException( 'Unable to create local directory for download.' );
-		}
-
-		$this->client()->getObject(
-			array(
-				'Bucket' => $this->bucket(),
-				'Key'    => $key,
-				'SaveAs' => $local_path,
-			)
-		);
-	}
-
-	public function presigned_url_for_key( string $key, int $ttl = 3600 ): string {
-		$ttl = max( 60, min( 86400, $ttl ) );
-		$cmd = $this->client()->getCommand(
-			'GetObject',
-			array(
-				'Bucket' => $this->bucket(),
-				'Key'    => $key,
-			)
-		);
-		$request = $this->client()->createPresignedRequest( $cmd, '+' . $ttl . ' seconds' );
-		return (string) $request->getUri();
-	}
-
 	private function is_missing_object_error( \Throwable $e ): bool {
 		$code = method_exists( $e, 'getAwsErrorCode' ) ? (string) $e->getAwsErrorCode() : '';
-		if ( in_array( $code, array( 'NoSuchKey', 'NotFound', '404' ), true ) ) {
+		if ( method_exists( $e, 'getStatusCode' ) && (int) $e->getStatusCode() === 404 ) {
+			return true;
+		}
+		return in_array( $code, array( 'NoSuchKey', 'NotFound', '404' ), true );
+	}
+
+	private function is_missing_multipart_upload_error( \Throwable $e ): bool {
+		$code = method_exists( $e, 'getAwsErrorCode' ) ? (string) $e->getAwsErrorCode() : '';
+		if ( $code === 'NoSuchUpload' ) {
 			return true;
 		}
 		$msg = strtolower( $e->getMessage() );
-		return str_contains( $msg, 'nosuchkey' ) || str_contains( $msg, 'not found' );
+		return str_contains( $msg, 'nosuchupload' )
+			|| str_contains( $msg, 'no such upload' );
+	}
+
+	private function normalize_etag( string $etag ): string {
+		if ( strlen( $etag ) >= 2 && $etag[0] === '"' && $etag[ strlen( $etag ) - 1 ] === '"' ) {
+			return substr( $etag, 1, -1 );
+		}
+		return $etag;
+	}
+
+	private function content_type_for_local_file( string $local_path ): string {
+		$type = function_exists( 'wp_check_filetype' )
+			? (string) ( wp_check_filetype( basename( $local_path ) )['type'] ?? '' )
+			: '';
+		if ( $type !== '' ) {
+			return $type;
+		}
+		if ( function_exists( 'mime_content_type' ) && is_file( $local_path ) ) {
+			$mime = mime_content_type( $local_path );
+			if ( is_string( $mime ) && $mime !== '' ) {
+				return $mime;
+			}
+		}
+		return 'application/octet-stream';
 	}
 }

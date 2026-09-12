@@ -254,7 +254,9 @@ final class AttachmentOffloader {
 				delete_post_meta($attachment_id, '_s3ms_last_error');
 
 				$service = new ObjectOffloadService($this->settings, $this->storage, $this->files);
-				return $service->offload($attachment_id, $delete_local, $metadata_override, $this->lock, $lease);
+				$result = $service->offload($attachment_id, $delete_local, $metadata_override);
+				$this->renew_or_abort($lease, 'object offload commit');
+				return $result;
 			}
 
 			$uploaded_keys = array();
@@ -290,23 +292,18 @@ final class AttachmentOffloader {
 				$original_key = $uploaded_keys[0];
 			}
 
-			$verification_failures = array();
+			$missing = array();
 			foreach (array_keys($local_files) as $relative) {
 				$head = $this->storage->head_relative($relative);
 				$size = is_file($local_files[$relative]) ? (int) filesize($local_files[$relative]) : null;
 				$observation = RemoteObservation::from_head_result($head, $size);
 				if (!$observation->is_size_verified()) {
-					$reason = match ($observation->verification_level) {
-						RemoteObservation::SIZE_MISMATCH => 'remote size mismatch',
-						RemoteObservation::NOT_VERIFIED => $observation->is_confirmed_missing() ? 'remote confirmed missing' : 'remote status unknown',
-						default => 'remote size not verified',
-					};
-					$verification_failures[] = $relative . ' (' . $reason . ')';
+					$missing[] = $relative;
 				}
 			}
 
-			if ($verification_failures !== array()) {
-				throw new \RuntimeException('Verification failed for: ' . implode(', ', array_slice($verification_failures, 0, 5)));
+			if ($missing !== array()) {
+				throw new \RuntimeException('Verification failed for: ' . implode(', ', array_slice($missing, 0, 5)));
 			}
 
 			$this->renew_or_abort($lease, 'offload metadata commit');
@@ -338,10 +335,7 @@ final class AttachmentOffloader {
 				$attachment_id,
 				$local_files,
 				$manifest_items,
-				$delete_local,
-				null,
-				$this->lock,
-				$lease
+				$delete_local
 			);
 			if ( $cleanup['skipped'] && str_contains( $cleanup['message'], 'verify failure' ) ) {
 				return array(

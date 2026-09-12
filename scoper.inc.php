@@ -95,5 +95,23 @@ return array(
 				$contents
 			);
 		},
+		// dbDelta() is a WordPress upgrade helper loaded from wp-admin/includes/upgrade.php
+		// immediately before use. It is intentionally global; prefixing it makes fresh
+		// package activation fatal because no scoped dbDelta() exists.
+		static function ( string $filePath, string $prefix, string $contents ): string {
+			if ( substr( $filePath, -strlen( '/includes/Infrastructure/SchemaMigrator.php' ) ) !== '/includes/Infrastructure/SchemaMigrator.php' ) {
+				return $contents;
+			}
+			$contents = str_replace(
+				"function_exists('" . $prefix . "\\\\dbDelta')",
+				"function_exists('dbDelta')",
+				$contents
+			);
+			return str_replace(
+				'\\' . $prefix . '\\dbDelta(',
+				'\\dbDelta(',
+				$contents
+			);
+		},
 	),
 );

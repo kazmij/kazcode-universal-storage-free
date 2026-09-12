@@ -24,6 +24,7 @@ use Kazcode\WpStorage\Services\RepairAttachmentService;
 use Kazcode\WpStorage\Services\RepairObjectService;
 use Kazcode\WpStorage\Services\StorageProfileAdminService;
 use Kazcode\WpStorage\Services\AdoptService;
+use Kazcode\WpStorage\Services\CompetitorImportService;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
 
 /**
@@ -32,9 +33,11 @@ use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
 final class BatchProcessor {
 
 	private MigrationService $migration;
+	private ?CompetitorImportService $competitor_imports;
 
-	public function __construct(MigrationService $migration) {
-		$this->migration = $migration;
+	public function __construct(MigrationService $migration, ?CompetitorImportService $competitor_imports = null) {
+		$this->migration           = $migration;
+		$this->competitor_imports = $competitor_imports;
 	}
 
 	/**
@@ -260,6 +263,58 @@ final class BatchProcessor {
 
 		register_rest_route(
 			'kazcode-storage/v1',
+			'/imports/detect',
+			array(
+				'methods'             => 'GET',
+				'callback'            => array( $this, 'rest_import_detect' ),
+				'permission_callback' => array( $this, 'can_manage' ),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
+			'/imports/dry-run/start',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'rest_import_dry_run_start' ),
+				'permission_callback' => array( $this, 'can_manage' ),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
+			'/imports/commit/start',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'rest_import_commit_start' ),
+				'permission_callback' => array( $this, 'can_manage' ),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
+			'/imports/(?P<uuid>[^/]+)',
+			array(
+				'methods'             => 'GET',
+				'callback'            => array( $this, 'rest_import_status' ),
+				'permission_callback' => array( $this, 'can_manage' ),
+			)
+		);
+
+		foreach ( array( 'pause', 'resume', 'cancel' ) as $action ) {
+			register_rest_route(
+				'kazcode-storage/v1',
+				'/imports/(?P<uuid>[^/]+)/' . $action,
+				array(
+					'methods'             => 'POST',
+					'callback'            => array( $this, 'rest_import_' . $action ),
+					'permission_callback' => array( $this, 'can_manage' ),
+				)
+			);
+		}
+
+		register_rest_route(
+			'kazcode-storage/v1',
 			'/audit',
 			array(
 				'methods'             => 'GET',
@@ -316,6 +371,13 @@ final class BatchProcessor {
 		return current_user_can('manage_options');
 	}
 
+	private function competitor_imports(): CompetitorImportService {
+		if ( $this->competitor_imports === null ) {
+			$this->competitor_imports = Plugin::instance()->competitor_imports();
+		}
+		return $this->competitor_imports;
+	}
+
 	/**
 	 * Background migrator — Plugin accessor with fallback.
 	 */
@@ -333,6 +395,141 @@ final class BatchProcessor {
 	 */
 	public function rest_stats(): \WP_REST_Response {
 		return new \WP_REST_Response($this->migration->stats(), 200);
+	}
+
+	public function rest_import_detect(): \WP_REST_Response {
+		return new \WP_REST_Response( $this->redact_credentials( $this->competitor_imports()->detect() ), 200 );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	public function rest_import_dry_run_start( \WP_REST_Request $request ) {
+		return $this->rest_import_start( $request, 'dry_run' );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	public function rest_import_commit_start( \WP_REST_Request $request ) {
+		return $this->rest_import_start( $request, 'commit' );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	public function rest_import_status( \WP_REST_Request $request ) {
+		$uuid = $this->request_uuid( $request );
+		if ( is_wp_error( $uuid ) ) {
+			return $uuid;
+		}
+		return $this->import_response( $this->competitor_imports()->status( $uuid ) );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	public function rest_import_pause( \WP_REST_Request $request ) {
+		$uuid = $this->request_uuid( $request );
+		if ( is_wp_error( $uuid ) ) {
+			return $uuid;
+		}
+		return $this->import_response( $this->competitor_imports()->pause( $uuid ) );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	public function rest_import_resume( \WP_REST_Request $request ) {
+		$uuid = $this->request_uuid( $request );
+		if ( is_wp_error( $uuid ) ) {
+			return $uuid;
+		}
+		return $this->import_response( $this->competitor_imports()->resume( $uuid ) );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	public function rest_import_cancel( \WP_REST_Request $request ) {
+		$uuid = $this->request_uuid( $request );
+		if ( is_wp_error( $uuid ) ) {
+			return $uuid;
+		}
+		return $this->import_response( $this->competitor_imports()->cancel( $uuid ) );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	private function rest_import_start( \WP_REST_Request $request, string $mode ) {
+		$source = $this->request_source( $request );
+		if ( is_wp_error( $source ) ) {
+			return $source;
+		}
+		$profile_id = (int) $request->get_param( 'profile' );
+		if ( $profile_id <= 0 ) {
+			return new \WP_Error( 'invalid_import_profile', 'A valid storage profile is required.', array( 'status' => 400 ) );
+		}
+
+		$result = $mode === 'commit'
+			? $this->competitor_imports()->start_commit( $source, $profile_id )
+			: $this->competitor_imports()->start_dry_run( $source, $profile_id );
+
+		return $this->import_response( $result );
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return string|\WP_Error
+	 */
+	private function request_source( \WP_REST_Request $request ) {
+		$raw       = (string) $request->get_param( 'source' );
+		$sanitized = sanitize_key( $raw );
+		if ( $sanitized === '' || $sanitized !== $raw ) {
+			return new \WP_Error( 'invalid_import_source', 'A valid import source is required.', array( 'status' => 400 ) );
+		}
+		return $sanitized;
+	}
+
+	/**
+	 * @param \WP_REST_Request $request Request.
+	 * @return string|\WP_Error
+	 */
+	private function request_uuid( \WP_REST_Request $request ) {
+		$uuid = strtolower( sanitize_text_field( (string) $request->get_param( 'uuid' ) ) );
+		if ( ! preg_match( '/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/', $uuid ) ) {
+			return new \WP_Error( 'invalid_import_uuid', 'A valid import run UUID is required.', array( 'status' => 400 ) );
+		}
+		return $uuid;
+	}
+
+	/** @param array<string, mixed> $result */
+	private function import_response( array $result ): \WP_REST_Response {
+		$status = ! empty( $result['success'] ) ? 200 : 400;
+		return new \WP_REST_Response( $this->redact_credentials( $result ), $status );
+	}
+
+	private function redact_credentials( mixed $value ): mixed {
+		if ( ! is_array( $value ) ) {
+			return $value;
+		}
+		$redacted = array();
+		foreach ( $value as $key => $item ) {
+			$key_string = is_string( $key ) ? strtolower( $key ) : '';
+			if ( $key_string !== '' && preg_match( '/(secret|token|credential|access_key|access-key|accesskey)/', $key_string ) ) {
+				continue;
+			}
+			$redacted[ $key ] = $this->redact_credentials( $item );
+		}
+		return $redacted;
 	}
 
 	/**

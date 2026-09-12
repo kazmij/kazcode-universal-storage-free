@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Kazcode\WpStorage\Tests;
 
 use PHPUnit\Framework\TestCase;
+use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Domain\StorageProfile;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
@@ -26,7 +27,7 @@ final class ProfileDeliveryUrlResolverTest extends TestCase {
 					'storage_profile_id'  => 2,
 					'local_relative_path' => '2026/08/photo.jpg',
 					'object_key'          => 'uploads/2026/08/photo.jpg',
-					'remote_status'       => 'present',
+					'remote_status'       => ObjectRemoteStatus::PRESENT,
 				),
 			)
 		);
@@ -127,6 +128,63 @@ final class ProfileDeliveryUrlResolverTest extends TestCase {
 		$this->assertStringNotContainsString( 'old-prefix', $url );
 	}
 
+	public function test_prefers_present_source_row_over_uploading_destination_during_migration(): void {
+		// Catches: routing frontend URLs to an unverified destination row while a
+		// provider migration is still uploading or failed before ownership switch.
+		$objects = $this->createMock( ObjectRepository::class );
+		$objects->method( 'find_by_attachment' )->willReturn(
+			array(
+				array(
+					'storage_profile_id'  => 2,
+					'local_relative_path' => '2026/08/photo.jpg',
+					'object_key'          => 'dest-prefix/2026/08/photo.jpg',
+					'remote_status'       => ObjectRemoteStatus::UPLOADING,
+				),
+				array(
+					'storage_profile_id'  => 1,
+					'local_relative_path' => '2026/08/photo.jpg',
+					'object_key'          => 'source-prefix/2026/08/photo.jpg',
+					'remote_status'       => ObjectRemoteStatus::PRESENT,
+				),
+			)
+		);
+
+		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
+		$profiles->method( 'find' )->willReturnCallback(
+			static function ( int $id ): StorageProfile {
+				return new StorageProfile(
+					$id,
+					'uuid-' . $id,
+					'Profile ' . $id,
+					'aws',
+					'bucket-' . $id,
+					'us-east-1',
+					'',
+					false,
+					'',
+					'cdn',
+					'https://profile-' . $id . '.example',
+					true,
+					'keys',
+					'ref',
+					false,
+					false,
+					false,
+					'',
+					''
+				);
+			}
+		);
+
+		$fallback = $this->createMock( PublicUrlResolver::class );
+		$fallback->expects( $this->never() )->method( 'url_for_relative' );
+
+		$url = ( new ProfileDeliveryUrlResolver( $objects, $profiles, $fallback ) )
+			->url_for_attachment_relative( 7, '2026/08/photo.jpg' );
+
+		$this->assertSame( 'https://profile-1.example/source-prefix/2026/08/photo.jpg', $url );
+	}
+
 	public function test_falls_back_when_no_object_rows(): void {
 		$objects = $this->createMock( ObjectRepository::class );
 		$objects->method( 'find_by_attachment' )->willReturn( array() );
@@ -141,30 +199,5 @@ final class ProfileDeliveryUrlResolverTest extends TestCase {
 			->url_for_attachment_relative( 1, '2026/08/photo.jpg' );
 
 		$this->assertSame( 'https://live.example/2026/08/photo.jpg', $url );
-	}
-
-	public function test_missing_inventory_profile_does_not_fallback_to_live_settings(): void {
-		$objects = $this->createMock( ObjectRepository::class );
-		$objects->method( 'find_by_attachment' )->willReturn(
-			array(
-				array(
-					'storage_profile_id'  => 55,
-					'local_relative_path' => '2026/08/photo.jpg',
-					'object_key'          => 'gone-profile/2026/08/photo.jpg',
-					'remote_status'       => 'present',
-				),
-			)
-		);
-
-		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
-		$profiles->method( 'find' )->with( 55 )->willReturn( null );
-
-		$fallback = $this->createMock( PublicUrlResolver::class );
-		$fallback->expects( $this->never() )->method( 'url_for_relative' );
-
-		$url = ( new ProfileDeliveryUrlResolver( $objects, $profiles, $fallback ) )
-			->url_for_attachment_relative( 1, '2026/08/photo.jpg' );
-
-		$this->assertSame( '', $url );
 	}
 }

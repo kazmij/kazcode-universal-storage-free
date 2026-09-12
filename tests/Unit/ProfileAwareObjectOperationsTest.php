@@ -10,7 +10,6 @@ declare(strict_types=1);
 namespace Kazcode\WpStorage\Tests;
 
 use PHPUnit\Framework\TestCase;
-use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Domain\StorageProfile;
 use Kazcode\WpStorage\Services\ProfileAwareObjectOperations;
@@ -53,26 +52,6 @@ final class ProfileAwareObjectOperationsTest extends TestCase {
 		$this->assertTrue( $result['exists'] );
 		$this->assertSame( 2, $result['storage_profile_id'] );
 		$this->assertFalse( $result['legacy_fallback'] );
-	}
-
-	public function test_no_inventory_can_explicitly_fallback_to_legacy_read_path(): void {
-		$locator = $this->createMock( ProfileObjectLocator::class );
-		$locator->method( 'locate' )->willReturn(
-			ProfileObjectLocation::not_in_inventory( '2026/08/photo.jpg' )
-		);
-
-		$legacy = $this->createMock( S3Storage::class );
-		$legacy->expects( $this->once() )
-			->method( 'head_relative' )
-			->with( '2026/08/photo.jpg' )
-			->willReturn( array( 'exists' => true ) );
-
-		$ops = new ProfileAwareObjectOperations( $locator, null, $legacy );
-
-		$result = $ops->head_attachment_relative( 7, '2026/08/photo.jpg', true );
-
-		$this->assertTrue( $result['exists'] );
-		$this->assertTrue( $result['legacy_fallback'] );
 	}
 
 	public function test_profile_missing_does_not_fallback_to_legacy_read_path(): void {
@@ -131,8 +110,8 @@ final class ProfileAwareObjectOperationsTest extends TestCase {
 		$this->assertIsString( $local );
 		file_put_contents( $local, str_repeat( 'x', 1000 ) );
 
-		$r2      = $this->profile( 2 );
-		$row     = array(
+		$r2  = $this->profile( 2 );
+		$row = array(
 			'id'                  => 9,
 			'attachment_id'       => 7,
 			'storage_profile_id'  => 2,

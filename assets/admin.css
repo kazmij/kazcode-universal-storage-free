@@ -83,6 +83,11 @@
 	margin: 0;
 }
 
+.s3ms-status-grid--import {
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	margin: 14px 0 0;
+}
+
 .s3ms-stat {
 	background: #fff;
 	border: 1px solid #d8dde3;
@@ -169,19 +174,8 @@
 	flex-wrap: wrap;
 	gap: 12px;
 	align-items: flex-start;
-	justify-content: flex-start;
+	justify-content: space-between;
 	padding: 16px 18px 0;
-}
-
-.s3ms-card__head > div {
-	flex: 0 1 auto;
-	min-width: 0;
-}
-
-.s3ms-card__head > .button,
-.s3ms-card__head > .button-primary,
-.s3ms-card__head > .button-secondary {
-	margin-left: auto;
 }
 
 .s3ms-card__title {
@@ -269,6 +263,48 @@
 	color: #646970;
 	font-size: 12.5px;
 	line-height: 1.45;
+}
+
+.s3ms-import-steps {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.s3ms-import-steps li {
+	display: inline-flex;
+	align-items: center;
+	min-height: 28px;
+	padding: 4px 9px;
+	border: 1px solid #d8dde3;
+	border-radius: 999px;
+	background: #f6f7f7;
+	color: #50575e;
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1.2;
+	white-space: nowrap;
+}
+
+.s3ms-import-steps li.is-active {
+	border-color: #2271b1;
+	background: #eef6fc;
+	color: #0a4b78;
+}
+
+.s3ms-import-fields {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.s3ms-import-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	margin: 14px 0 8px;
 }
 
 .s3ms-badge {
@@ -466,7 +502,8 @@
 	}
 
 	.s3ms-status-grid,
-	.s3ms-status-grid--compact {
+	.s3ms-status-grid--compact,
+	.s3ms-status-grid--import {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
 }
@@ -477,7 +514,9 @@
 	}
 
 	.s3ms-status-grid,
-	.s3ms-status-grid--compact {
+	.s3ms-status-grid--compact,
+	.s3ms-status-grid--import,
+	.s3ms-import-fields {
 		grid-template-columns: 1fr;
 	}
 
@@ -870,10 +909,6 @@
 }
 
 .s3ms-tour-launch {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	flex-wrap: wrap;
 	margin: -10px 0 16px;
 }
 
@@ -881,8 +916,6 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
-	min-height: 30px;
-	margin: 0;
 }
 
 /* dashicons glyphs render visually low within their own em-box even when

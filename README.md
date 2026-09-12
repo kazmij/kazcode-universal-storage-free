@@ -2,17 +2,22 @@
 
 Offload WordPress Media Library binaries to Amazon S3 (or any S3-compatible storage — Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2) while keeping WordPress as the source of truth and the native Media Library UX unchanged.
 
-WordPress keeps attachment posts, metadata, titles, alt text, and `_wp_attached_file` (always a **relative path**, never a URL). Remote storage holds only the binary files — originals and every generated image size. Existing remote objects are resolved through the Storage Profile recorded in the object inventory; changing the default upload profile only affects new uploads and does not relocate historical media. Public URLs are built at render time from the owning profile's current delivery/CDN configuration, so changing delivery settings on that profile does not require rewriting attachment paths in the database.
+WordPress keeps attachment posts, metadata, titles, alt text, and `_wp_attached_file` (always a **relative path**, never a URL). Remote storage holds only the binary files — originals and every generated image size. Public URLs are built at render time from your current settings, not stored, so switching a CDN hostname or storage profile never requires touching the database.
 
 **Full documentation:** [kazcode.net/universal-storage/docs/](https://kazcode.net/universal-storage/docs/) — this README covers the same ground for people already reading the repo.
 
-This repository is the public development source for the **Free** KAZCODE Universal
-Storage WordPress plugin — [product page](https://kazcode.net/universal-storage/). The
-commercial **Pro** add-on is a separate plugin (installed independently, requires Free
-active) and is **not** contained in this repository. WordPress.org listing status:
-submitted and pending review. The plugin is not publicly listed on WordPress.org yet,
-so do not assume "Approved", "Official", or "Available on WordPress.org" until that is
-actually true.
+This repository is the public source mirror for the **Free** KAZCODE Universal
+Storage WordPress plugin. The canonical production release source remains the
+main KAZCODE repository and immutable release tag; this mirror is synchronized
+from the Free plugin directory for each public Free release.
+
+- WordPress.org: <https://wordpress.org/plugins/kazcode-universal-storage/>
+- Product: <https://kazcode.net/universal-storage/>
+- Documentation: <https://kazcode.net/universal-storage/docs/>
+- Pro/pricing: <https://kazcode.net/universal-storage/#pricing>
+
+The commercial **Pro** add-on is a separate plugin (installed independently,
+requires Free active) and is **not** contained in this repository.
 
 ## Table of contents
 
@@ -45,6 +50,8 @@ actually true.
 
 - **Offload** — new uploads (and every generated image size) move to remote storage automatically after WordPress finishes processing them.
 - **Migrate** — move existing Media Library files to remote storage in resumable batches, with dry-run and per-attachment modes.
+- **Resume** — large uploads use durable multipart state so interrupted work can continue safely.
+- **Adopt** — import existing inventory from WP Offload Media or Advanced Media Offloader without deleting competitor data.
 - **Restore** — download files back to local disk on demand; nothing is one-way.
 - **Repair** — re-upload or re-verify individual objects that failed or drifted, without touching everything else.
 - **Native UX** — Media Library Grid/List, the media modal, Featured Image, Gutenberg image blocks, and Edit Image all keep working exactly as before; theme and plugin static assets are never touched, only Media Library attachments.
@@ -59,10 +66,12 @@ actually true.
 | Native Media Library integration (S3 column, row/bulk actions) | ✓ | ✓ |
 | Health checks, repair, WP-CLI, REST API | ✓ | ✓ |
 | Background/resumable migration (WP-Cron) | ✓ | ✓ |
+| Crash-resumable multipart upload and recovery | ✓ | ✓ |
+| Import from WP Offload Media or Advanced Media Offloader | ✓ | ✓ |
 | Private media (signed, time-limited URLs) | ✓ | ✓ |
 | Audit log (settings saves, background job history) | ✓ | ✓ |
 | Multiple storage profiles | — | ✓ |
-| Cross-provider / cross-bucket migration (with verify-before-switch) | — | ✓ |
+| Cross-provider / cross-bucket migration (with verify-before-switch; uses shared resumable transfer engine) | — | ✓ |
 | Per-profile independent credentials | — | ✓ |
 | Orphan scan (dry-run, never deletes) | — | ✓ |
 | Advanced health / reconcile | — | ✓ |
@@ -78,7 +87,7 @@ Amazon S3, Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2, and 
 
 - WordPress 6.7+
 - PHP 8.3+
-- Pro (if installed) requires Free active, version 1.0.0 or newer
+- Pro 1.1.x (if installed) requires Free active, version 1.1.0 or newer
 
 ## Installation
 
@@ -109,7 +118,7 @@ Amazon S3, Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2, and 
 
 ## Migration
 
-**Universal Storage → Migration** — batch-migrate existing attachments with dry-run, retry-failed, and verify modes. Large libraries should prefer WP-CLI (below) for unattended runs.
+**Universal Storage → Migration** — batch-migrate existing attachments with dry-run, retry-failed, and verify modes. Large local uploads resume safely after interruption using durable multipart state. The same screen also imports existing inventory from **WP Offload Media** or **Advanced Media Offloader**: detection is read-only, a dry-run is mandatory before import, exact remote keys are HEAD-verified, and no credentials are copied from the other plugin. Imports never modify the other plugin's data. Large libraries should prefer WP-CLI (below) for unattended runs.
 
 ## Health
 

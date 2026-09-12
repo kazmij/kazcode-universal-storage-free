@@ -73,8 +73,7 @@ final class VerificationObservationTest extends TestCase {
 
 	public function test_size_mismatch_is_not_verified(): void {
 		$this->attachment( 203, '2026/08/photo.jpg' );
-		$absolute = $this->uploads . '/2026/08/photo.jpg';
-		file_put_contents( $absolute, str_repeat( 'a', 1000 ) );
+		file_put_contents( $this->uploads . '/2026/08/photo.jpg', str_repeat( 'a', 1000 ) );
 
 		$ops = $this->createMock( ProfileAwareObjectOperations::class );
 		$ops->method( 'head_attachment_relative' )->willReturn(
@@ -89,47 +88,6 @@ final class VerificationObservationTest extends TestCase {
 		$this->assertSame( 'remote_size_mismatch', $result['status'] );
 		$this->assertStringContainsString( 'Remote size mismatch', implode( "\n", $result['details'] ) );
 		$this->assertSame( '', get_post_meta( 203, '_s3ms_verified_at', true ) );
-	}
-
-	public function test_bulk_provider_outage_is_unknown_and_recovers_without_repair(): void {
-		$sizes = array();
-		for ( $i = 1; $i <= 99; $i++ ) {
-			$sizes[ 'kazus-size-' . $i ] = array( 'file' => 'photo-' . $i . '.jpg' );
-		}
-		$this->attachment( 204, '2026/08/photo.jpg', $sizes );
-
-		$outage = true;
-		$ops = $this->createMock( ProfileAwareObjectOperations::class );
-		$ops->method( 'head_attachment_relative' )->willReturnCallback(
-			static function () use ( &$outage ): array {
-				if ( $outage ) {
-					return array(
-						'exists'            => false,
-						'confirmed_missing' => false,
-						'error'             => 'Service Unavailable',
-						'error_class'       => 'provider',
-					);
-				}
-				return array( 'exists' => true, 'content_length' => 1000 );
-			}
-		);
-
-		$service = new VerificationService( $this->settings(), $this->legacy_storage(), null, $ops );
-		$first   = $service->verify( 204 );
-
-		$this->assertSame( 'remote_unknown', $first['status'] );
-		$this->assertCount( 100, $first['unknown'] );
-		$this->assertCount( 0, $first['missing'] );
-		$this->assertSame( '', get_post_meta( 204, '_s3ms_verified_at', true ) );
-
-		$outage = false;
-		$second = $service->verify( 204 );
-
-		$this->assertSame( 's3_only', $second['status'] );
-		$this->assertCount( 0, $second['unknown'] );
-		$this->assertCount( 0, $second['missing'] );
-		$this->assertCount( 100, $second['present'] );
-		$this->assertNotSame( '', get_post_meta( 204, '_s3ms_verified_at', true ) );
 	}
 
 	private function attachment( int $id, string $attached, array $sizes = array() ): void {

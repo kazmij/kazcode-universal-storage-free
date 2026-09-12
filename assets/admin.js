@@ -90,7 +90,16 @@
 			headers: headers(),
 			credentials: 'same-origin'
 		});
-		return res.json();
+		var data = await res.json().catch(function () {
+			return {};
+		});
+		if (!res.ok) {
+			var err = new Error((data && (data.message || data.code)) || s3msAdmin.i18n.failed);
+			err.payload = data;
+			err.status = res.status;
+			throw err;
+		}
+		return data;
 	}
 
 	async function testConnectionAjax() {
@@ -455,6 +464,245 @@
 		});
 	}
 
+	(function () {
+		var root = document.getElementById('s3ms-import-wizard');
+		if (!root) {
+			return;
+		}
+
+		var sourceEl = document.getElementById('s3ms-import-source');
+		var profileEl = document.getElementById('s3ms-import-profile');
+		var statusEl = document.getElementById('s3ms-import-status');
+		var pollTimer = null;
+		var currentRun = null;
+		var completedDryRun = null;
+
+		function importButton(action) {
+			return root.querySelector('[data-s3ms-import-action="' + action + '"]');
+		}
+
+		function setWizardState(state) {
+			root.setAttribute('data-s3ms-import-state', state);
+			root.querySelectorAll('[data-s3ms-import-step]').forEach(function (step) {
+				step.classList.toggle('is-active', step.getAttribute('data-s3ms-import-step') === state);
+			});
+		}
+
+		function setImportStatus(text, ok) {
+			if (!statusEl) {
+				return;
+			}
+			statusEl.textContent = text || '';
+			statusEl.classList.remove('is-ok', 'is-error');
+			if (text) {
+				statusEl.classList.add(ok ? 'is-ok' : 'is-error');
+			}
+		}
+
+		function selectedImportPair() {
+			return {
+				source: sourceEl ? sourceEl.value : '',
+				profile: profileEl ? parseInt(profileEl.value || '0', 10) : 0
+			};
+		}
+
+		function samePair(a, b) {
+			return !!a && !!b && a.source === b.source && a.profile === b.profile;
+		}
+
+		function enableImportControls(run) {
+			var pair = selectedImportPair();
+			var running = !!run && (run.status === 'running' || run.status === 'pending');
+			var paused = !!run && run.status === 'paused';
+			var commitFinished = !!run && run.mode === 'commit' && (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled');
+			var completedMatchingDryRun =
+				!!completedDryRun &&
+				completedDryRun.status === 'completed' &&
+				completedDryRun.mode === 'dry_run' &&
+				samePair(completedDryRun.pair, pair);
+
+			importButton('detect').disabled = running || paused || commitFinished;
+			importButton('analyze').disabled = !pair.source || !pair.profile || running || commitFinished;
+			importButton('commit').disabled = !completedMatchingDryRun || running || paused || commitFinished;
+			importButton('pause').disabled = !run || !run.uuid || !running;
+			importButton('resume').disabled = !run || !run.uuid || !paused;
+			importButton('cancel').disabled = !run || !run.uuid || (!running && !paused);
+			if (sourceEl) {
+				sourceEl.disabled = running || paused || commitFinished;
+			}
+			if (profileEl) {
+				profileEl.disabled = running || paused || commitFinished;
+			}
+		}
+
+		function setCount(name, value) {
+			var node = root.querySelector('[data-s3ms-import-count="' + name + '"]');
+			if (node) {
+				node.textContent = String(value);
+			}
+		}
+
+		function renderImportRun(run) {
+			if (!run) {
+				return;
+			}
+			var processed = parseInt(run.processed || '0', 10) || 0;
+			var verified = parseInt(run.verified || '0', 10) || 0;
+			var missing = parseInt(run.missing || '0', 10) || 0;
+			var transientErrors = parseInt(run.transient_errors || '0', 10) || 0;
+			var conflicts = parseInt(run.conflicts || '0', 10) || 0;
+			var skipped = parseInt(run.skipped || '0', 10) || 0;
+			setCount('processed', processed);
+			setCount('objects_checked', run.objects_checked || processed);
+			setCount('verified', verified);
+			setCount('missing', missing);
+			setCount('transient_errors', transientErrors);
+			setCount('conflicts', conflicts);
+			setCount('skipped', skipped);
+			setCount('updated', run.updated_at || new Date().toLocaleTimeString());
+
+			if (run.mode === 'dry_run') {
+				setWizardState(run.status === 'completed' ? 'import' : 'analyze');
+			} else if (run.mode === 'commit') {
+				setWizardState(run.status === 'completed' ? 'report' : 'import');
+			}
+			setImportStatus('Import ' + run.mode + ' is ' + run.status + '.', run.status !== 'failed' && run.status !== 'cancelled');
+		}
+
+		function stopImportPolling() {
+			if (pollTimer) {
+				window.clearTimeout(pollTimer);
+				pollTimer = null;
+			}
+		}
+
+		async function pollImportRun() {
+			if (!currentRun || !currentRun.uuid) {
+				return;
+			}
+			try {
+				var run = await get('imports/' + encodeURIComponent(currentRun.uuid));
+				currentRun = Object.assign({}, currentRun, run);
+				renderImportRun(currentRun);
+				if (currentRun.mode === 'dry_run' && currentRun.status === 'completed') {
+					completedDryRun = Object.assign({}, currentRun, { pair: currentRun.pair });
+				}
+				enableImportControls(currentRun);
+				if (currentRun.status === 'running' || currentRun.status === 'pending') {
+					pollTimer = window.setTimeout(pollImportRun, 2500);
+				}
+			} catch (e) {
+				stopImportPolling();
+				currentRun = Object.assign({}, currentRun, { status: 'failed' });
+				setImportStatus(String(e && e.message ? e.message : e), false);
+				enableImportControls(currentRun);
+			}
+		}
+
+		function beginImportPolling(run, pair) {
+			stopImportPolling();
+			currentRun = Object.assign({}, run, { pair: pair });
+			renderImportRun(currentRun);
+			if (currentRun.mode === 'dry_run' && currentRun.status === 'completed') {
+				completedDryRun = Object.assign({}, currentRun);
+			}
+			enableImportControls(currentRun);
+			if (currentRun.status === 'running' || currentRun.status === 'pending') {
+				pollTimer = window.setTimeout(pollImportRun, 500);
+			}
+		}
+
+		async function detectImportSources() {
+			setWizardState('detect');
+			setImportStatus(s3msAdmin.i18n.running || 'Running...', true);
+			var detected = await get('imports/detect');
+			var selected = sourceEl ? sourceEl.value : '';
+			var ids = Object.keys(detected || {});
+			if (sourceEl) {
+				sourceEl.innerHTML = '';
+				if (!ids.length) {
+					var placeholder = document.createElement('option');
+					placeholder.value = '';
+					placeholder.textContent = 'Detect sources first';
+					sourceEl.appendChild(placeholder);
+				}
+				ids.forEach(function (id) {
+					var option = document.createElement('option');
+					var item = detected[id] || {};
+					option.value = id;
+					option.textContent = item.source_label || item.label || id;
+					sourceEl.appendChild(option);
+				});
+				if (selected && ids.indexOf(selected) !== -1) {
+					sourceEl.value = selected;
+				}
+			}
+			setImportStatus(ids.length ? 'Detected ' + ids.length + ' import source(s).' : 'No supported import sources detected.', true);
+			enableImportControls(currentRun);
+		}
+
+		async function startImportRun(mode) {
+			var pair = selectedImportPair();
+			if (!pair.source || !pair.profile) {
+				setImportStatus('Choose a source plugin and storage profile first.', false);
+				return;
+			}
+			setWizardState(mode === 'dry_run' ? 'analyze' : 'import');
+			setImportStatus(s3msAdmin.i18n.running || 'Running...', true);
+			enableImportControls({ status: 'running' });
+			var run = await post(mode === 'dry_run' ? 'imports/dry-run/start' : 'imports/commit/start', {
+				source: pair.source,
+				profile: pair.profile
+			});
+			beginImportPolling(run, pair);
+		}
+
+		async function transitionImportRun(action) {
+			if (!currentRun || !currentRun.uuid) {
+				return;
+			}
+			setImportStatus(s3msAdmin.i18n.running || 'Running...', true);
+			var run = await post('imports/' + encodeURIComponent(currentRun.uuid) + '/' + action, {});
+			beginImportPolling(run, currentRun.pair);
+		}
+
+		root.querySelectorAll('[data-s3ms-import-action]').forEach(function (btn) {
+			btn.addEventListener('click', async function () {
+				var action = btn.getAttribute('data-s3ms-import-action');
+				btn.disabled = true;
+				try {
+					if (action === 'detect') {
+						await detectImportSources();
+					} else if (action === 'analyze') {
+						await startImportRun('dry_run');
+					} else if (action === 'commit') {
+						await startImportRun('commit');
+					} else {
+						await transitionImportRun(action);
+					}
+				} catch (e) {
+					stopImportPolling();
+					setImportStatus(String(e && e.message ? e.message : e), false);
+					enableImportControls(currentRun);
+				}
+			});
+		});
+
+		if (sourceEl) {
+			sourceEl.addEventListener('change', function () {
+				setWizardState('storage');
+				enableImportControls(currentRun);
+			});
+		}
+		if (profileEl) {
+			profileEl.addEventListener('change', function () {
+				setWizardState('storage');
+				enableImportControls(currentRun);
+			});
+		}
+		enableImportControls(null);
+	})();
+
 	function appendToLog(el, text) {
 		if (!el) {
 			return;
@@ -805,20 +1053,6 @@
 			fetch(s3msAdmin.ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body });
 		}
 
-		function disableAllToursOnServer() {
-			if (window.s3msTour) {
-				window.s3msTour.dismissed = true;
-				window.s3msTour.globallyDisabled = true;
-			}
-			if (!s3msAdmin.ajaxUrl || !s3msAdmin.ajaxNonce) {
-				return;
-			}
-			var body = new FormData();
-			body.append('action', 'kazus_disable_tours');
-			body.append('nonce', s3msAdmin.ajaxNonce);
-			fetch(s3msAdmin.ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body });
-		}
-
 		function clearHighlight() {
 			document.querySelectorAll('.s3ms-tour-target').forEach(function (el) {
 				el.classList.remove('s3ms-tour-target');
@@ -870,7 +1104,6 @@
 				(current > 0 ? '<button type="button" class="button" data-tour-back>' + 'Back' + '</button>' : '') +
 				'</span>' +
 				'<span class="s3ms-tour__actions-right">' +
-				'<button type="button" class="button" data-tour-disable-all>Disable tutorials</button>' +
 				'<button type="button" class="button" data-tour-skip>Skip</button>' +
 				'<button type="button" class="button button-primary" data-tour-next>' +
 				(isLast ? 'Finish' : 'Next') +
@@ -901,10 +1134,6 @@
 			tooltip.querySelector('[data-tour-skip]').addEventListener('click', function () {
 				endTour(true);
 			});
-			tooltip.querySelector('[data-tour-disable-all]').addEventListener('click', function () {
-				endTour(false);
-				disableAllToursOnServer();
-			});
 			tooltip.querySelector('[data-tour-next]').addEventListener('click', function () {
 				if (isLast) {
 					endTour(true);
@@ -933,15 +1162,6 @@
 		if (replayBtn) {
 			replayBtn.addEventListener('click', function () {
 				startTour();
-			});
-		}
-		var disableAllBtn = document.getElementById('s3ms-tour-disable-all');
-		if (disableAllBtn) {
-			disableAllBtn.addEventListener('click', function () {
-				endTour(false);
-				disableAllToursOnServer();
-				disableAllBtn.textContent = 'Tutorials disabled';
-				disableAllBtn.disabled = true;
 			});
 		}
 

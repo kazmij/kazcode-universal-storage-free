@@ -1,8 +1,13 @@
 # Building the release ZIP
 
-This document describes exactly how `kazcode-universal-storage-1.0.0.zip` — the artifact
-distributed for manual download and submitted to WordPress.org — is produced from this
-repository's source.
+This document describes how `kazcode-universal-storage-$VERSION.zip` is produced.
+For public releases, the source of truth is the main KAZCODE repository's
+immutable release tag. This public repository mirrors the Free plugin source for
+each public release; it is not a competing release source of truth.
+
+The release source of truth is a clean Git release commit/tag. Do not release from a
+working tree that contains source changes not committed in the release tag. SVN is a
+publication transport, not the source of truth.
 
 ## Requirements
 
@@ -18,12 +23,31 @@ repository's source.
 
 ```bash
 composer install                # installs aws/aws-sdk-php + dev tools (phpunit, php-scoper, dg/bypass-finals)
-composer build:release          # bash build/build-release.sh -> dist/kazcode-universal-storage-1.0.0.zip
+composer build:release          # bash build/build-release.sh -> dist/kazcode-universal-storage-$VERSION.zip
 composer build:verify-scoped    # bash build/verify-scoped-build.sh (also run automatically at the end of build:release)
 ```
 
 `composer test` (`phpunit --configuration phpunit.xml.dist`) runs the unit suite against
-the unscoped dev `vendor/` — 174 tests, 429 assertions, all passing as of 1.0.0.
+the unscoped dev `vendor/`.
+
+For public releases, first verify the exact Git tag/commit:
+
+```bash
+VERSION=1.1.0
+TAG=v1.1.0
+COMMIT="$(git rev-parse HEAD)"
+php build/release-integrity.php preflight --source . --version "$VERSION" --tag "$TAG" --commit "$COMMIT"
+```
+
+Preferred public-release build command:
+
+```bash
+bash build/release-build-from-tag.sh "$VERSION" "$TAG" "$COMMIT"
+```
+
+That command creates a temporary detached Git worktree from the tag, runs preflight in
+that clean source, builds there, generates a manifest, and copies only the final release
+artifacts back to `dist/`.
 
 ## Why PHP-Scoper
 
@@ -58,7 +82,7 @@ prefixed. The unmodified original AWS SDK source is public:
    `tests/`, `docs/`, `build/`, `vendor/bin/`, `phpunit.xml.dist`, `composer.lock`,
    `scoper.inc.php`, `.gitignore`, `test-product-features-local.php`, any
    `docker-compose*.yml`.
-7. Zips the result as `dist/kazcode-universal-storage-1.0.0.zip`.
+7. Zips the result as `dist/kazcode-universal-storage-$VERSION.zip`.
 8. Runs `build/verify-scoped-build.sh` against that ZIP — checks that no unscoped
    third-party class reference leaked through.
 
@@ -84,18 +108,43 @@ without tripping its separate rule against bundling application files.
 ## Verifying the scoped build yourself
 
 ```bash
-unzip -l dist/kazcode-universal-storage-1.0.0.zip | head -30   # inspect contents
-unzip -d /tmp/kazus-check dist/kazcode-universal-storage-1.0.0.zip
+VERSION=1.1.0
+ZIP="dist/kazcode-universal-storage-${VERSION}.zip"
+unzip -l "$ZIP" | head -30   # inspect contents
+unzip -d /tmp/kazus-check "$ZIP"
 grep -rl "^namespace Aws\\\\" /tmp/kazus-check/kazcode-universal-storage/vendor/ && echo "UNSCOPED REFERENCE FOUND (bad)" || echo "OK: no unscoped Aws\\ namespace found"
+php build/release-integrity.php package --package "$ZIP" --version "$VERSION"
+php build/release-integrity.php manifest --path "$ZIP" --output "dist/kazcode-universal-storage-${VERSION}.manifest.sha256"
 ```
 
 `build/verify-scoped-build.sh` does a more thorough version of this same check and is run
 automatically at the end of `composer build:release`.
 
+Before publishing to WordPress.org SVN, compare the exact local package to prepared SVN
+`trunk/` and `tags/$VERSION/`:
+
+```bash
+php build/release-integrity.php compare --expected "$ZIP" --actual /path/to/svn/kazcode-universal-storage/trunk
+php build/release-integrity.php compare --expected "$ZIP" --actual "/path/to/svn/kazcode-universal-storage/tags/${VERSION}"
+```
+
+Both comparisons must report `local-only=0`, `package-only=0`, and `different=0`.
+
+After SVN publication, download the public WordPress.org ZIP and compare runtime
+content. The ZIP file SHA-256 may differ because WordPress.org repackages from SVN; the
+extracted runtime manifest must match:
+
+```bash
+curl -L "https://downloads.wordpress.org/plugin/kazcode-universal-storage.${VERSION}.zip" -o "/tmp/kazcode-universal-storage.${VERSION}.zip"
+php build/release-integrity.php post-publish --local-zip "$ZIP" --public-zip "/tmp/kazcode-universal-storage.${VERSION}.zip" --version "$VERSION"
+```
+
+Detailed operator steps live in `docs/WORDPRESS-ORG-RELEASE-WORKFLOW.md`.
+
 ## Installing the result
 
 ```bash
-wp plugin install dist/kazcode-universal-storage-1.0.0.zip --activate
+wp plugin install "dist/kazcode-universal-storage-${VERSION}.zip" --activate
 ```
 
 or upload the ZIP through **Plugins → Add New → Upload Plugin** in wp-admin.

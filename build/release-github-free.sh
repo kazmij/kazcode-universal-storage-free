@@ -167,6 +167,15 @@ remote_tag_commit="$(git -C "${REPO_ROOT}" rev-list -n 1 "${remote_tag}")"
 verify_zip "${ZIP_PATH}"
 ZIP_SHA="$(sha256sum "${ZIP_PATH}" | awk '{print $1}')"
 ZIP_SIZE="$(stat -c '%s' "${ZIP_PATH}")"
+PRO_MAIN="${REPO_ROOT}/kazcode-universal-storage-pro/kazcode-universal-storage-pro.php"
+PRO_VERSION="current"
+PRO_REQUIRES_CORE="declared compatible Free/Core version"
+if [[ -f "${PRO_MAIN}" ]]; then
+	PRO_VERSION="$(grep -m1 "KAZUS_PRO_VERSION" "${PRO_MAIN}" | sed -E "s/.*'([0-9.]+)'.*/\1/" || true)"
+	PRO_REQUIRES_CORE="$(grep -m1 "KAZUS_PRO_REQUIRES_CORE" "${PRO_MAIN}" | sed -E "s/.*'([^']+)'.*/\1/" || true)"
+	[[ -n "${PRO_VERSION}" ]] || PRO_VERSION="current"
+	[[ -n "${PRO_REQUIRES_CORE}" ]] || PRO_REQUIRES_CORE="declared compatible Free/Core version"
+fi
 
 if [[ -z "${WORK_DIR}" ]]; then
 	WORK_DIR="$(mktemp -d)"
@@ -246,7 +255,7 @@ KAZCODE verifies remote content before destructive local cleanup, treats tempora
 provider/network failures as unknown rather than missing, fences concurrent stale
 operations, preserves long object-key identity, and keeps retries recoverable.
 
-## Pro ${VERSION}
+## Pro ${PRO_VERSION}
 
 KAZCODE Universal Storage Pro adds multiple storage profiles, resumable
 provider-to-provider migration, verified destination cutover, source-authoritative
@@ -256,7 +265,7 @@ migration until verification succeeds, and optional safe source cleanup.
 
 Free 1.0.2 to ${VERSION} is supported. The database schema upgrades
 automatically, existing settings/profiles/media state are preserved, and Pro
-${VERSION} requires Free/Core ${VERSION} or newer.
+${PRO_VERSION} requires Free/Core ${PRO_REQUIRES_CORE} or newer.
 
 ## Requirements
 

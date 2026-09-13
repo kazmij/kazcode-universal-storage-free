@@ -66,8 +66,13 @@ try {
 	if (!preg_match('/Version:\s*' . preg_quote($version, '/') . '\b/', $core)) {
 		exit(fail('Free plugin Version header does not match requested version.'));
 	}
-	if ($pro !== '' && !preg_match('/Version:\s*' . preg_quote($version, '/') . '\b/', $pro)) {
-		exit(fail('Pro plugin Version header does not match requested version.'));
+	$pro_version = null;
+	$pro_requires_core = null;
+	if ($pro !== '' && preg_match('/Version:\s*([0-9.]+)\b/', $pro, $m)) {
+		$pro_version = $m[1];
+	}
+	if ($pro !== '' && preg_match("/define\\(\\s*'KAZUS_PRO_REQUIRES_CORE'\\s*,\\s*'([^']+)'\\s*\\)/", $pro, $m)) {
+		$pro_requires_core = $m[1];
 	}
 
 	$freemius_product = null;
@@ -80,7 +85,9 @@ try {
 		'source_commit' => $commit,
 		'source_tag' => $tag,
 		'free_artifact' => "kazcode-universal-storage-{$version}.zip",
-		'pro_artifact' => "kazcode-universal-storage-pro-{$version}.zip",
+		'pro_version' => $pro_version,
+		'pro_requires_core' => $pro_requires_core,
+		'pro_artifact' => $pro_version !== null ? "kazcode-universal-storage-pro-{$pro_version}.zip" : null,
 		'wporg_slug' => 'kazcode-universal-storage',
 		'freemius_product_id' => $freemius_product,
 		'release_channel' => 'stable',

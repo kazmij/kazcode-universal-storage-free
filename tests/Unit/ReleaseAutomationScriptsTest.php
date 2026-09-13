@@ -53,6 +53,7 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 	public function test_release_scripts_expose_help(): void {
 		foreach (array(
 			'/build/release-wordpress-org.sh',
+			'/build/release-verify-wordpress-org.sh',
 			'/build/release-github-free.sh',
 			'/build/capture-wordpress-screenshots.sh',
 			'/build/deploy-kazcode-site.sh',
@@ -86,6 +87,76 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringContainsString('build/release-freemius.php upload', $makefile);
 		self::assertStringContainsString('--mode "$(MODE)"', $makefile);
 		self::assertStringContainsString('DEXEC_RELEASE', $makefile);
+	}
+
+	public function test_release_metadata_allows_free_patch_without_matching_pro_patch(): void {
+		$script = file_get_contents($this->root . '/build/release-metadata.php');
+
+		self::assertIsString($script);
+		self::assertStringNotContainsString('Pro plugin Version header does not match requested version.', $script);
+		self::assertStringContainsString("'pro_version' =>", $script);
+		self::assertStringContainsString("'pro_requires_core' =>", $script);
+		self::assertStringContainsString('"kazcode-universal-storage-pro-{$pro_version}.zip"', $script);
+	}
+
+	public function test_build_release_packages_pro_using_declared_pro_version(): void {
+		$script = file_get_contents($this->root . '/build/build-release.sh');
+		$from_tag = file_get_contents($this->root . '/build/release-build-from-tag.sh');
+
+		self::assertIsString($script);
+		self::assertIsString($from_tag);
+		self::assertStringContainsString('KAZUS_PRO_VERSION', $script);
+		self::assertStringContainsString('PRO_ZIP="${DIST}/${PRO_SLUG}-${PRO_VERSION}.zip"', $script);
+		self::assertStringContainsString("find dist -maxdepth 1 -name 'kazcode-universal-storage-pro-*.zip'", $from_tag);
+		self::assertStringNotContainsString('dist/kazcode-universal-storage-pro-${VERSION}.zip', $from_tag);
+	}
+
+	public function test_github_free_release_notes_use_actual_pro_compatibility_not_free_version(): void {
+		$script = file_get_contents($this->root . '/build/release-github-free.sh');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('KAZUS_PRO_VERSION', $script);
+		self::assertStringContainsString('KAZUS_PRO_REQUIRES_CORE', $script);
+		self::assertStringContainsString('## Pro ${PRO_VERSION}', $script);
+		self::assertStringContainsString('${PRO_VERSION} requires Free/Core ${PRO_REQUIRES_CORE} or newer', $script);
+		self::assertStringNotContainsString('## Pro ${VERSION}', $script);
+		self::assertStringNotContainsString('${VERSION} requires Free/Core ${VERSION} or newer', $script);
+	}
+
+	public function test_makefile_wordpress_release_verification_is_worktree_safe_by_default(): void {
+		$makefile_path = dirname($this->root) . '/Makefile';
+		if (!is_file($makefile_path)) {
+			self::markTestSkipped('Repository Makefile is not available in plugin-only test installs.');
+		}
+
+		$makefile = file_get_contents($makefile_path);
+
+		self::assertIsString($makefile);
+		self::assertStringContainsString('release-verify-wordpress-org.sh', $makefile);
+		self::assertStringContainsString('$(RELEASE_DOCKER)', $makefile);
+		self::assertStringContainsString('ifeq ($(origin CONTAINER),command line)', $makefile);
+		self::assertStringNotContainsString('release-verify-wp: setup', $makefile);
+		self::assertStringNotContainsString("cd $(CORE_DIR) && curl -fsSL \"https://downloads.wordpress.org/plugin/kazcode-universal-storage.$(VERSION).zip\"", $makefile);
+	}
+
+	public function test_wordpress_release_verifier_supports_explicit_container_without_fixed_plugin_path(): void {
+		$script = file_get_contents($this->root . '/build/release-verify-wordpress-org.sh');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('--container NAME', $script);
+		self::assertStringContainsString('docker|podman', $script);
+		self::assertStringContainsString('container not found or not running', $script);
+		self::assertStringContainsString('must provide php and unzip', $script);
+		self::assertStringContainsString('release-integrity.php" post-publish', $script);
+		self::assertStringContainsString('docker cp', str_replace('"${RUNTIME}" cp', 'docker cp', $script));
+		self::assertStringNotContainsString('/var/www/html/wp-content/plugins/kazcode-universal-storage', $script);
+	}
+
+	public function test_wordpress_release_verifier_fails_clearly_when_no_php_runtime_is_available(): void {
+		$result = $this->run_command('PATH=/nonexistent /bin/bash ' . escapeshellarg($this->root . '/build/release-verify-wordpress-org.sh') . ' --version 0.0.0 --zip ' . escapeshellarg($this->root . '/missing.zip'));
+
+		self::assertNotSame(0, $result['code']);
+		self::assertStringContainsString('local ZIP not found', $result['output']);
 	}
 
 	public function test_github_free_release_script_uses_gh_as_primary_path(): void {

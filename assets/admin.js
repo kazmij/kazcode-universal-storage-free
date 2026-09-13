@@ -872,10 +872,15 @@
 		var resultEl = document.getElementById('s3ms-profile-form-result');
 		var lockedNote = document.getElementById('s3ms-profile-location-locked');
 		var titleEl = document.getElementById('s3ms-profile-editor-title');
+		var testProfileBtn = document.getElementById('s3ms-profile-test');
+		var profileTestStepsEl = document.getElementById('s3ms-profile-test-steps');
 
 		function profilePayload() {
 			var delivery = document.querySelector('input[name="s3ms_profile_delivery"]:checked');
-			return {
+			var useSiteCredentialsField = document.getElementById('s3ms-profile-use-site-credentials');
+			var accessKeyField = document.getElementById('s3ms-profile-access-key-id');
+			var secretField = document.getElementById('s3ms-profile-secret-access-key');
+			var payload = {
 				id: parseInt(idField.value || '0', 10) || undefined,
 				name: (document.getElementById('s3ms-profile-name') || {}).value || '',
 				provider_type: (document.getElementById('s3ms-profile-provider') || {}).value || 'aws',
@@ -888,6 +893,14 @@
 				delivery_base_url: (document.getElementById('s3ms-profile-delivery-url') || {}).value || '',
 				cdn_includes_prefix: !!(document.getElementById('s3ms-profile-cdn-prefix') || {}).checked
 			};
+			payload.use_site_credentials = !useSiteCredentialsField || !!useSiteCredentialsField.checked;
+			if (!payload.use_site_credentials && accessKeyField) {
+				payload.access_key_id = accessKeyField.value || '';
+			}
+			if (secretField && secretField.value !== '') {
+				payload.secret_access_key = secretField.value;
+			}
+			return payload;
 		}
 
 		function setLocationEditable(editable) {
@@ -899,6 +912,14 @@
 			}
 		}
 
+		function setCredentialFieldsEnabled() {
+			var useSiteCredentialsField = document.getElementById('s3ms-profile-use-site-credentials');
+			var useSite = !useSiteCredentialsField || !!useSiteCredentialsField.checked;
+			document.querySelectorAll('.s3ms-profile-credential-field input').forEach(function (el) {
+				el.disabled = useSite;
+			});
+		}
+
 		function fillForm(profile) {
 			idField.value = profile && profile.id ? String(profile.id) : '';
 			(document.getElementById('s3ms-profile-name') || {}).value = profile && profile.name ? profile.name : '';
@@ -908,6 +929,9 @@
 			(document.getElementById('s3ms-profile-endpoint') || {}).value = profile && profile.endpoint ? profile.endpoint : '';
 			(document.getElementById('s3ms-profile-prefix') || {}).value = profile && profile.prefix ? profile.prefix : '';
 			(document.getElementById('s3ms-profile-path-style') || {}).checked = !!(profile && profile.path_style);
+			(document.getElementById('s3ms-profile-use-site-credentials') || {}).checked = !profile || profile.uses_site_credentials !== false;
+			(document.getElementById('s3ms-profile-access-key-id') || {}).value = profile && profile.access_key_id && profile.uses_site_credentials === false ? profile.access_key_id : '';
+			(document.getElementById('s3ms-profile-secret-access-key') || {}).value = '';
 			(document.getElementById('s3ms-profile-delivery-url') || {}).value = profile && profile.delivery_base_url ? profile.delivery_base_url : '';
 			(document.getElementById('s3ms-profile-cdn-prefix') || {}).checked = !!(profile && profile.cdn_includes_prefix);
 			var delivery = profile && profile.delivery_type === 'cdn' ? 'cdn' : 'storage';
@@ -915,6 +939,7 @@
 				el.checked = el.value === delivery;
 			});
 			setLocationEditable(!profile || profile.location_editable !== false);
+			setCredentialFieldsEnabled();
 		}
 
 		function openEditor(profile) {
@@ -925,6 +950,12 @@
 			if (resultEl) {
 				resultEl.textContent = '';
 				resultEl.classList.remove('is-ok', 'is-error');
+			}
+			if (profileTestStepsEl) {
+				profileTestStepsEl.innerHTML = '';
+			}
+			if (testProfileBtn) {
+				testProfileBtn.hidden = !(profile && profile.id);
 			}
 			profileEditor.hidden = false;
 			profileEditor.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -951,6 +982,37 @@
 		var cancelBtn = document.getElementById('s3ms-profile-cancel');
 		if (cancelBtn) {
 			cancelBtn.addEventListener('click', closeEditor);
+		}
+
+		var useSiteCredentialsField = document.getElementById('s3ms-profile-use-site-credentials');
+		if (useSiteCredentialsField) {
+			useSiteCredentialsField.addEventListener('change', setCredentialFieldsEnabled);
+		}
+
+		if (testProfileBtn) {
+			testProfileBtn.addEventListener('click', async function () {
+				var id = parseInt(idField.value || '0', 10);
+				if (!id) {
+					setResultState(resultEl, false, 'Save this profile before testing its connection.');
+					return;
+				}
+				testProfileBtn.disabled = true;
+				if (profileTestStepsEl) {
+					profileTestStepsEl.innerHTML = '';
+				}
+				setResultState(resultEl, true, s3msAdmin.i18n.testing || 'Testing...');
+				try {
+					var data = await post('storage-profiles/test', { id: id });
+					setResultState(resultEl, !!data.success, data.success ? s3msAdmin.i18n.success : s3msAdmin.i18n.failed);
+					renderSteps(profileTestStepsEl, data.steps || []);
+				} catch (e) {
+					setResultState(resultEl, false, String(e && e.message ? e.message : e));
+					var payload = e && e.payload ? e.payload : null;
+					renderSteps(profileTestStepsEl, payload && payload.steps ? payload.steps : []);
+				} finally {
+					testProfileBtn.disabled = false;
+				}
+			});
 		}
 
 		document.querySelectorAll('.s3ms-profile-default').forEach(function (btn) {
@@ -1001,6 +1063,10 @@
 				}
 				try {
 					var data = await post('storage-profiles/save', profilePayload());
+					var secretField = document.getElementById('s3ms-profile-secret-access-key');
+					if (secretField) {
+						secretField.value = '';
+					}
 					setResultState(resultEl, true, s3msAdmin.i18n.success || 'Saved.');
 					window.setTimeout(function () {
 						window.location.reload();

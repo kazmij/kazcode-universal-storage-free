@@ -25,6 +25,7 @@ use Kazcode\WpStorage\Services\RepairObjectService;
 use Kazcode\WpStorage\Services\StorageProfileAdminService;
 use Kazcode\WpStorage\Services\AdoptService;
 use Kazcode\WpStorage\Services\CompetitorImportService;
+use Kazcode\WpStorage\Storage\ProfileStorageGateway;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
 
 /**
@@ -98,6 +99,16 @@ final class BatchProcessor {
 				'methods'             => 'POST',
 				'callback'            => array($this, 'rest_test_connection'),
 				'permission_callback' => array($this, 'can_manage'),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
+			'/storage-profiles/test',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'rest_storage_profiles_test' ),
+				'permission_callback' => array( $this, 'can_manage' ),
 			)
 		);
 
@@ -983,6 +994,164 @@ final class BatchProcessor {
 
 		$status = ! empty( $result['success'] ) ? 200 : 400;
 		return new \WP_REST_Response( $result, $status );
+	}
+
+	/**
+	 * Test one saved storage profile using that profile's effective credentials.
+	 *
+	 * @param \WP_REST_Request $request Request.
+	 */
+	public function rest_storage_profiles_test( \WP_REST_Request $request ): \WP_REST_Response {
+		$params = $request->get_json_params();
+		if ( ! is_array( $params ) ) {
+			$params = $request->get_params();
+		}
+		$id = (int) ( $params['id'] ?? 0 );
+		if ( $id <= 0 ) {
+			return new \WP_REST_Response(
+				array(
+					'success' => false,
+					'steps'   => array(
+						array(
+							'name'   => 'profile',
+							'ok'     => false,
+							'detail' => 'A saved profile is required before running a profile connection test.',
+						),
+					),
+				),
+				200
+			);
+		}
+
+		$profile = ( new WpdbStorageProfileRepository() )->find( $id );
+		if ( $profile === null ) {
+			return new \WP_REST_Response(
+				array(
+					'success' => false,
+					'steps'   => array(
+						array(
+							'name'   => 'profile',
+							'ok'     => false,
+							'detail' => 'Storage profile was not found.',
+						),
+					),
+				),
+				200
+			);
+		}
+
+		$gateway = new ProfileStorageGateway( $profile, Plugin::instance()->settings() );
+		return new \WP_REST_Response( $this->run_profile_connection_test( $gateway, $profile->prefix ), 200 );
+	}
+
+	/**
+	 * @return array{success:bool,steps:list<array{name:string,ok:bool,detail:string}>}
+	 */
+	private function run_profile_connection_test( ProfileStorageGateway $gateway, string $prefix ): array {
+		$steps = array();
+
+		try {
+			$client = $gateway->client();
+			$steps[] = array(
+				'name'   => 'client',
+				'ok'     => true,
+				'detail' => 'Profile S3 client initialized.',
+			);
+		} catch ( \Throwable $e ) {
+			return array(
+				'success' => false,
+				'steps'   => array(
+					array(
+						'name'   => 'client',
+						'ok'     => false,
+						'detail' => 'Failed to initialize profile S3 client.',
+					),
+				),
+			);
+		}
+
+		try {
+			$client->headBucket( array( 'Bucket' => $gateway->bucket() ) );
+			$steps[] = array(
+				'name'   => 'bucket',
+				'ok'     => true,
+				'detail' => 'Profile bucket is reachable.',
+			);
+		} catch ( \Throwable $e ) {
+			$steps[] = array(
+				'name'   => 'bucket',
+				'ok'     => false,
+				'detail' => 'Unable to access profile bucket.',
+			);
+			return array(
+				'success' => false,
+				'steps'   => $steps,
+			);
+		}
+
+		$tmp = wp_tempnam( 's3ms-profile-test' );
+		if ( $tmp === false ) {
+			$steps[] = array(
+				'name'   => 'upload',
+				'ok'     => false,
+				'detail' => 'Unable to create temporary file.',
+			);
+			return array(
+				'success' => false,
+				'steps'   => $steps,
+			);
+		}
+
+		file_put_contents( $tmp, 's3ms-profile-connection-test' );
+		$key_prefix = trim( $prefix, '/' );
+		$key        = ( $key_prefix !== '' ? $key_prefix . '/' : '' ) . 's3ms-connection-test/' . wp_generate_password( 12, false ) . '.txt';
+
+		try {
+			$gateway->put_object_from_file( $key, $tmp, 'text/plain', '' );
+			$steps[] = array(
+				'name'   => 'upload',
+				'ok'     => true,
+				'detail' => 'Profile test object uploaded.',
+			);
+
+			$head = $gateway->head_key( $key );
+			if ( empty( $head['exists'] ) ) {
+				throw new \RuntimeException( 'HEAD failed after profile test upload.' );
+			}
+			$steps[] = array(
+				'name'   => 'head',
+				'ok'     => true,
+				'detail' => 'Profile HEAD succeeded.',
+			);
+
+			$gateway->delete_key( $key );
+			$steps[] = array(
+				'name'   => 'delete',
+				'ok'     => true,
+				'detail' => 'Profile test object deleted.',
+			);
+		} catch ( \Throwable $e ) {
+			try {
+				$gateway->delete_key( $key );
+			} catch ( \Throwable $ignored ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			}
+			wp_delete_file( $tmp );
+			$steps[] = array(
+				'name'   => 'upload',
+				'ok'     => false,
+				'detail' => 'Profile upload/HEAD/delete failed.',
+			);
+			return array(
+				'success' => false,
+				'steps'   => $steps,
+			);
+		}
+
+		wp_delete_file( $tmp );
+		return array(
+			'success' => true,
+			'steps'   => $steps,
+		);
 	}
 
 	/**

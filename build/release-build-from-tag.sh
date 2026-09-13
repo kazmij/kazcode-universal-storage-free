@@ -61,23 +61,26 @@ rsync -a --delete "${PLUGIN_ROOT}/build/" "${BUILD_ROOT}/build/"
 	CORE_ZIP="dist/kazcode-universal-storage-${VERSION}.zip"
 	php "${PLUGIN_ROOT}/build/release-integrity.php" package --package "${CORE_ZIP}" --version "${VERSION}"
 	php "${PLUGIN_ROOT}/build/release-integrity.php" manifest --path "${CORE_ZIP}" --output "dist/kazcode-universal-storage-${VERSION}.manifest.sha256"
-	if [[ -f "dist/kazcode-universal-storage-pro-${VERSION}.zip" ]]; then
-		php "${PLUGIN_ROOT}/build/release-integrity.php" manifest --path "dist/kazcode-universal-storage-pro-${VERSION}.zip" --output "dist/kazcode-universal-storage-pro-${VERSION}.manifest.sha256"
+	PRO_ZIP="$(find dist -maxdepth 1 -name 'kazcode-universal-storage-pro-*.zip' -print | sort | head -n 1)"
+	if [[ -n "${PRO_ZIP}" ]]; then
+		php "${PLUGIN_ROOT}/build/release-integrity.php" manifest --path "${PRO_ZIP}" --output "${PRO_ZIP%.zip}.manifest.sha256"
 	fi
 )
 
 mkdir -p "${PLUGIN_ROOT}/dist"
 cp "${BUILD_ROOT}/dist/kazcode-universal-storage-${VERSION}.zip" "${PLUGIN_ROOT}/dist/"
 cp "${BUILD_ROOT}/dist/kazcode-universal-storage-${VERSION}.manifest.sha256" "${PLUGIN_ROOT}/dist/"
-if [[ -f "${BUILD_ROOT}/dist/kazcode-universal-storage-pro-${VERSION}.zip" ]]; then
-	cp "${BUILD_ROOT}/dist/kazcode-universal-storage-pro-${VERSION}.zip" "${PLUGIN_ROOT}/dist/"
-	cp "${BUILD_ROOT}/dist/kazcode-universal-storage-pro-${VERSION}.manifest.sha256" "${PLUGIN_ROOT}/dist/"
+PRO_ZIP="$(find "${BUILD_ROOT}/dist" -maxdepth 1 -name 'kazcode-universal-storage-pro-*.zip' -print | sort | head -n 1)"
+if [[ -n "${PRO_ZIP}" ]]; then
+	cp "${PRO_ZIP}" "${PLUGIN_ROOT}/dist/"
+	cp "${PRO_ZIP%.zip}.manifest.sha256" "${PLUGIN_ROOT}/dist/"
 fi
 
 echo "Built from ${TAG} (${TAG_COMMIT}):"
 sha256sum "${PLUGIN_ROOT}/dist/kazcode-universal-storage-${VERSION}.zip"
 sha256sum "${PLUGIN_ROOT}/dist/kazcode-universal-storage-${VERSION}.manifest.sha256"
-if [[ -f "${PLUGIN_ROOT}/dist/kazcode-universal-storage-pro-${VERSION}.zip" ]]; then
-	sha256sum "${PLUGIN_ROOT}/dist/kazcode-universal-storage-pro-${VERSION}.zip"
-	sha256sum "${PLUGIN_ROOT}/dist/kazcode-universal-storage-pro-${VERSION}.manifest.sha256"
+PRO_ZIP="$(find "${PLUGIN_ROOT}/dist" -maxdepth 1 -name 'kazcode-universal-storage-pro-*.zip' -print | sort | head -n 1)"
+if [[ -n "${PRO_ZIP}" ]]; then
+	sha256sum "${PRO_ZIP}"
+	sha256sum "${PRO_ZIP%.zip}.manifest.sha256"
 fi

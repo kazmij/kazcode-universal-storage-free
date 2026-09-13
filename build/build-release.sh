@@ -28,7 +28,12 @@ COMPOSER_AUTOLOADER_SUFFIX="${KAZUS_COMPOSER_AUTOLOADER_SUFFIX:-8cdd760b077ab5b8
 CORE_SLUG="kazcode-universal-storage"
 PRO_SLUG="kazcode-universal-storage-pro"
 CORE_ZIP="${DIST}/${CORE_SLUG}-${VERSION}.zip"
-PRO_ZIP="${DIST}/${PRO_SLUG}-${VERSION}.zip"
+PRO_VERSION=""
+PRO_ZIP=""
+if [[ -n "${PRO_ROOT}" ]]; then
+	PRO_VERSION="$(grep -m1 "KAZUS_PRO_VERSION" "${PRO_ROOT}/kazcode-universal-storage-pro.php" | sed -E "s/.*'([0-9.]+)'.*/\1/")"
+	PRO_ZIP="${DIST}/${PRO_SLUG}-${PRO_VERSION}.zip"
+fi
 
 cleanup() {
 	rm -rf "${STAGE}"
@@ -197,7 +202,7 @@ echo "==> Verify scoped core ZIP"
 bash "${ROOT}/build/verify-scoped-build.sh" "${CORE_ZIP}"
 
 if [[ -d "${PRO_ROOT}" ]]; then
-	echo "==> Packaging ${PRO_SLUG}-${VERSION}.zip"
+	echo "==> Packaging ${PRO_SLUG}-${PRO_VERSION}.zip"
 	# vendor/ mixes composer's dev-only install (PHPUnit, php-scoper, etc. —
 	# excluded below) with the manually-vendored Freemius SDK at
 	# vendor/freemius/, which IS runtime-required and must ship. The

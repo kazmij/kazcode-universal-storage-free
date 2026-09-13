@@ -187,6 +187,24 @@ final class StoragePage {
 									<?php esc_html_e( 'Force path-style endpoint', 'kazcode-universal-storage' ); ?>
 								</label>
 							</div>
+							<?php if ( $can_multi ) : ?>
+								<div class="s3ms-field">
+									<label>
+										<input type="checkbox" id="s3ms-profile-use-site-credentials" checked />
+										<?php esc_html_e( 'Use site-wide credentials from Settings', 'kazcode-universal-storage' ); ?>
+									</label>
+									<p class="description"><?php esc_html_e( 'Disable this when the profile needs its own provider credentials, such as an R2 migration destination.', 'kazcode-universal-storage' ); ?></p>
+								</div>
+								<div class="s3ms-field s3ms-profile-credential-field">
+									<label class="s3ms-field__label" for="s3ms-profile-access-key-id"><?php esc_html_e( 'Access key ID', 'kazcode-universal-storage' ); ?></label>
+									<input class="s3ms-field__input regular-text" type="text" id="s3ms-profile-access-key-id" autocomplete="off" />
+								</div>
+								<div class="s3ms-field s3ms-profile-credential-field">
+									<label class="s3ms-field__label" for="s3ms-profile-secret-access-key"><?php esc_html_e( 'Secret access key', 'kazcode-universal-storage' ); ?></label>
+									<input class="s3ms-field__input regular-text" type="password" id="s3ms-profile-secret-access-key" value="" autocomplete="new-password" placeholder="<?php echo esc_attr__( 'Leave blank to keep the stored secret', 'kazcode-universal-storage' ); ?>" />
+									<p class="description"><?php esc_html_e( 'Secrets are encrypted at rest and are never shown again after saving.', 'kazcode-universal-storage' ); ?></p>
+								</div>
+							<?php endif; ?>
 							<div class="s3ms-field">
 								<span class="s3ms-field__label"><?php esc_html_e( 'Delivery mode', 'kazcode-universal-storage' ); ?></span>
 								<label><input type="radio" name="s3ms_profile_delivery" value="storage" checked /> <?php esc_html_e( 'Default storage URL', 'kazcode-universal-storage' ); ?></label><br />
@@ -207,9 +225,11 @@ final class StoragePage {
 						<p class="description s3ms-profile-location-locked-note" id="s3ms-profile-location-locked" hidden><?php esc_html_e( 'Location fields are locked because this profile already stores objects or was frozen after migration.', 'kazcode-universal-storage' ); ?></p>
 						<p>
 							<button type="submit" class="button button-primary" id="s3ms-profile-save"><?php esc_html_e( 'Save profile', 'kazcode-universal-storage' ); ?></button>
+							<button type="button" class="button" id="s3ms-profile-test" hidden><?php esc_html_e( 'Test profile connection', 'kazcode-universal-storage' ); ?></button>
 							<button type="button" class="button" id="s3ms-profile-cancel"><?php esc_html_e( 'Cancel', 'kazcode-universal-storage' ); ?></button>
 							<span id="s3ms-profile-form-result" class="s3ms-test-result"></span>
 						</p>
+						<ul id="s3ms-profile-test-steps" class="s3ms-steps-list"></ul>
 					</form>
 				</div>
 			</section>

@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: 1.1.1
+Stable tag: 1.1.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -143,6 +143,11 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 
 == Changelog ==
 
+= 1.1.2 =
+* Fixed Pro storage profile setup so additional profiles can use their own provider credentials.
+* Added per-profile connection testing for multi-provider setups.
+* Preserved existing site-wide credential behavior and secure secret handling.
+
 = 1.1.1 =
 * Improved WordPress.org plugin description and onboarding instructions.
 * Added clearer installation guidance for new and existing Media Libraries.
@@ -160,6 +165,9 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 * Improved long object-key identity and database upgrade safety.
 
 == Upgrade Notice ==
+
+= 1.1.2 =
+Fixes Pro multi-profile setup for cross-provider storage credentials. Existing site-wide credentials, profiles, media inventory, and schema are preserved.
 
 = 1.1.1 =
 Documentation and listing update only. Storage configuration, media inventory, schema, and runtime behavior are unchanged from 1.1.0.

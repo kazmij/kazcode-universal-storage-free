@@ -11,6 +11,7 @@ namespace Kazcode\WpStorage\Services;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Plugin;
 
@@ -184,7 +185,7 @@ final class BackgroundMigrator {
 				$result = $migration->restore_batch( $batch, null, $after );
 			}
 		} catch ( \Throwable $e ) {
-			$job['last_error'] = $e->getMessage();
+			$job['last_error'] = SecretRedactor::redact( $e );
 			$job['updated_at'] = gmdate( 'c' );
 			update_option( self::OPTION_KEY, $job, false );
 			$this->ensure_scheduled();

@@ -33,6 +33,21 @@ final class MultipartPlan {
 			return new self( false, 0, 1 );
 		}
 
+		return self::multipart_for_size( $size_bytes, $requested_part_size );
+	}
+
+	/**
+	 * Build a multipart plan even when the normal threshold would select a single PUT.
+	 */
+	public static function for_forced_multipart_size( int $size_bytes, int $threshold_bytes, int $requested_part_size ): self {
+		if ( $size_bytes <= 0 ) {
+			throw new \InvalidArgumentException( 'Forced multipart requires a non-empty source.' );
+		}
+
+		return self::multipart_for_size( $size_bytes, $requested_part_size );
+	}
+
+	private static function multipart_for_size( int $size_bytes, int $requested_part_size ): self {
 		$minimum_for_max_parts = intdiv( $size_bytes + self::MAX_PARTS - 1, self::MAX_PARTS );
 		$part_size            = max( $requested_part_size, $minimum_for_max_parts, self::MIN_PART_BYTES );
 		$part_size            = self::round_up_to_mib( $part_size );

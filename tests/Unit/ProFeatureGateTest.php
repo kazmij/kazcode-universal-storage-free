@@ -28,6 +28,24 @@ final class ProFeatureGateTest extends TestCase {
 		ProFeatureGate::require( 'orphan_scan' );
 	}
 
+	/**
+	 * ProFeatureGate must keep rejecting Pro-only operations on Free even when
+	 * kazus_feature_enabled is forced to true — the gate goes through
+	 * Features::enabled(), so the monotonic Pro floor must hold there too.
+	 */
+	public function test_require_still_throws_when_feature_filter_forced_true(): void {
+		add_filter(
+			'kazus_feature_enabled',
+			static function (): bool {
+				return true;
+			}
+		);
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'orphan_scan' );
+		ProFeatureGate::require( 'orphan_scan' );
+	}
+
 	// Service-level "returns error when gated" coverage for orphan scan /
 	// provider migration now lives with those services in
 	// kazcode-universal-storage-pro/tests/Unit/ (they physically moved there — see

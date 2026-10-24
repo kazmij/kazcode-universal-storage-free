@@ -82,6 +82,17 @@ final class RemoteObservation {
 	}
 
 	public static function classify_error( string $error, string $provider_code = '', ?int $status_code = null ): string {
+		$code = strtolower( trim( $provider_code ) );
+		if ( self::is_auth_provider_code( $code ) ) {
+			return self::ERROR_AUTH;
+		}
+		if ( $status_code !== null && $status_code >= 500 && $status_code <= 599 ) {
+			return self::ERROR_PROVIDER;
+		}
+		if ( $status_code === 408 ) {
+			return self::ERROR_TIMEOUT;
+		}
+
 		$normalized = strtolower( trim( $error . ' ' . $provider_code . ' ' . (string) ( $status_code ?? '' ) ) );
 		if ( str_contains( $normalized, 'access denied' ) || str_contains( $normalized, 'forbidden' ) || str_contains( $normalized, 'unauthorized' ) || str_contains( $normalized, '403' ) || str_contains( $normalized, '401' ) ) {
 			return self::ERROR_AUTH;
@@ -104,10 +115,36 @@ final class RemoteObservation {
 		if ( str_contains( $normalized, '500' ) || str_contains( $normalized, '502' ) || str_contains( $normalized, '503' ) || str_contains( $normalized, 'service unavailable' ) ) {
 			return self::ERROR_PROVIDER;
 		}
-		if ( str_contains( $normalized, 'invalid' ) || str_contains( $normalized, 'bad request' ) || str_contains( $normalized, '400' ) ) {
+		if (
+			str_contains( $normalized, 'nosuchbucket' )
+			|| str_contains( $normalized, 'invalidbucketname' )
+			|| str_contains( $normalized, 'permanentredirect' )
+			|| str_contains( $normalized, 'authorizationheadermalformed' )
+			|| str_contains( $normalized, 'invalid' )
+			|| str_contains( $normalized, 'bad request' )
+			|| str_contains( $normalized, '400' )
+		) {
 			return self::ERROR_INVALID_REQUEST;
 		}
 		return self::ERROR_UNKNOWN;
+	}
+
+	private static function is_auth_provider_code( string $provider_code ): bool {
+		return in_array(
+			$provider_code,
+			array(
+				'accessdenied',
+				'invalidaccesskeyid',
+				'expiredtoken',
+				'signaturedoesnotmatch',
+				'invalidtoken',
+				'tokenrefreshrequired',
+				'invalidsecurity',
+				'unrecognizedclient',
+				'expiredtokenexception',
+			),
+			true
+		);
 	}
 
 	public function is_size_verified(): bool {

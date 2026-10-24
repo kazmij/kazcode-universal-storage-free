@@ -34,6 +34,7 @@ final class Features {
 	 */
 	public static function pro_feature_keys(): array {
 		return array(
+			'direct_upload',
 			'multisite_network',
 			'multiple_profiles',
 			'storage_profile_migration',
@@ -62,23 +63,39 @@ final class Features {
 	/**
 	 * Whether a named feature is available.
 	 *
+	 * Extension filters on `kazus_feature_enabled` are monotonic for Pro-only
+	 * keys: they may narrow/disable a capability, but they must never unlock a
+	 * Pro-only capability when no Pro module is registered. That keeps the
+	 * ModuleRegistry registration as the sole production unlock path.
+	 *
 	 * @param string $feature Feature key.
 	 */
 	public static function enabled( string $feature ): bool {
-		$pro_only = self::pro_feature_keys();
+		$pro_only       = self::pro_feature_keys();
+		$is_pro_feature = in_array( $feature, $pro_only, true );
 
 		$allowed = true;
-		if ( in_array( $feature, $pro_only, true ) && ! self::is_pro_active() ) {
+		if ( $is_pro_feature && ! self::is_pro_active() ) {
 			$allowed = false;
 		}
 
 		/**
 		 * Filter whether a feature is enabled.
 		 *
+		 * For Pro-only feature keys, returning true cannot override a false
+		 * base value when the Pro add-on is not registered. Use this filter
+		 * only to narrow availability (true → false), never to unlock Pro.
+		 *
 		 * @param bool   $allowed Whether enabled.
 		 * @param string $feature Feature key.
 		 * @param string $plan    Active plan.
 		 */
-		return (bool) apply_filters( 'kazus_feature_enabled', $allowed, $feature, self::plan() );
+		$filtered = (bool) apply_filters( 'kazus_feature_enabled', $allowed, $feature, self::plan() );
+
+		if ( $is_pro_feature ) {
+			return $allowed && $filtered;
+		}
+
+		return $filtered;
 	}
 }

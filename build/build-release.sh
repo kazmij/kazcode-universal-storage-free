@@ -234,6 +234,10 @@ if [[ -d "${PRO_ROOT}" ]]; then
 		rm -f "${PRO_ZIP}"
 		zip -rq "${PRO_ZIP}" "${PRO_SLUG}"
 	)
+	# Keep the Freemius-required package metadata check with the packager, not
+	# only in CI: a manually run release build must fail before its ZIP can be
+	# mistaken for a valid Pro artifact.
+	bash "${ROOT}/build/verify-pro-package.sh" "${PRO_ZIP}"
 else
 	echo "WARN: Pro plugin directory not found at ${PRO_ROOT}; skipping Pro ZIP."
 fi

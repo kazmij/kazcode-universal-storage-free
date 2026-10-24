@@ -49,7 +49,8 @@ final class ObjectHealthState {
 	public static function classify_row( array $row, bool $local_present ): string {
 		$remote = (string) ( $row['remote_status'] ?? '' );
 
-		if ( $remote === ObjectRemoteStatus::STALE ) {
+		// Superseded or intentionally removed variants are never repair targets.
+		if ( $remote === ObjectRemoteStatus::STALE || $remote === ObjectRemoteStatus::DELETED ) {
 			return self::STALE;
 		}
 		if ( $remote === ObjectRemoteStatus::FAILED ) {

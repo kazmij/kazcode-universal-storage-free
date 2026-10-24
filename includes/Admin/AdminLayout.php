@@ -230,6 +230,7 @@ final class AdminLayout {
 			AdminMenu::STORAGE_SLUG    => __( 'Storage', 'kazcode-universal-storage' ),
 			AdminMenu::MIGRATION_SLUG  => __( 'Migration', 'kazcode-universal-storage' ),
 			AdminMenu::HEALTH_SLUG     => __( 'Health', 'kazcode-universal-storage' ),
+			AdminMenu::INTEGRITY_SLUG  => __( 'Integrity', 'kazcode-universal-storage' ),
 			AdminMenu::LOGS_SLUG       => __( 'Logs', 'kazcode-universal-storage' ),
 			AdminMenu::SETTINGS_SLUG   => __( 'Settings', 'kazcode-universal-storage' ),
 		);

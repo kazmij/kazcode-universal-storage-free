@@ -100,4 +100,71 @@ final class FeaturesProTest extends TestCase {
 		$this->assertFalse( Features::enabled( 'storage_profile_migration' ) );
 		$this->assertFalse( Features::enabled( 'orphan_scan' ) );
 	}
+
+	/**
+	 * kazus_feature_enabled may narrow availability, but must never unlock a
+	 * Pro-only capability when the Pro add-on has not registered a module.
+	 * A forced true from a filter (or a misbehaving integration) is treated
+	 * as a no-op for Pro keys on Free.
+	 */
+	public function test_feature_enabled_filter_cannot_unlock_pro_without_module(): void {
+		add_filter(
+			'kazus_feature_enabled',
+			static function (): bool {
+				return true;
+			}
+		);
+
+		$this->assertFalse( Features::is_pro_active() );
+		foreach ( Features::pro_feature_keys() as $feature ) {
+			$this->assertFalse(
+				Features::enabled( $feature ),
+				"filter must not unlock Pro feature {$feature} without Pro module"
+			);
+		}
+	}
+
+	/**
+	 * With a real Pro module registered, the same filter remains useful for
+	 * narrowing: integrations may disable a Pro capability site-wide, but
+	 * intended Pro features stay available when the filter does not intervene.
+	 */
+	public function test_feature_enabled_filter_can_narrow_when_pro_active(): void {
+		ModuleRegistry::instance()->register(
+			new class() implements ModuleInterface {
+				public function id(): string {
+					return 'pro-stub-narrow';
+				}
+
+				public function name(): string {
+					return 'Pro stub narrow';
+				}
+
+				public function is_pro(): bool {
+					return true;
+				}
+
+				public function boot(): void {
+				}
+			}
+		);
+
+		$this->assertTrue( Features::is_pro_active() );
+		$this->assertTrue( Features::enabled( 'orphan_scan' ) );
+
+		add_filter(
+			'kazus_feature_enabled',
+			static function ( bool $allowed, string $feature ): bool {
+				if ( $feature === 'orphan_scan' ) {
+					return false;
+				}
+				return $allowed;
+			},
+			10,
+			2
+		);
+
+		$this->assertFalse( Features::enabled( 'orphan_scan' ) );
+		$this->assertTrue( Features::enabled( 'multiple_profiles' ) );
+	}
 }

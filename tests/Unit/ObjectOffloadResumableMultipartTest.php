@@ -242,15 +242,27 @@ final class ObjectOffloadResumableMultipartTest extends TestCase {
 
 		$next_id = 1;
 		$objects = $this->createMock( ObjectRepository::class );
-		$objects->method( 'upsert' )->willReturnCallback(
-			static function ( array $data ) use ( &$rows, &$next_id ): int {
-				$key = (int) ( $data['storage_profile_id'] ?? 0 ) . ':' . (string) ( $data['object_key'] ?? '' );
-				if ( ! isset( $rows[ $key ] ) ) {
-					$rows[ $key ] = array_merge( $data, array( 'id' => $next_id++ ) );
-				} else {
-					$rows[ $key ] = array_merge( $rows[ $key ], $data );
+		$objects->method( 'insert_owned_or_conflict' )->willReturnCallback(
+			static function ( array $data ) use ( &$rows, &$next_id ): array {
+				$key        = (int) ( $data['storage_profile_id'] ?? 0 ) . ':' . (string) ( $data['object_key'] ?? '' );
+				$attachment = (int) ( $data['attachment_id'] ?? 0 );
+				$relative   = (string) ( $data['local_relative_path'] ?? '' );
+				if ( isset( $rows[ $key ] ) ) {
+					$existing = $rows[ $key ];
+					if (
+						(int) ( $existing['attachment_id'] ?? 0 ) !== $attachment
+						|| (string) ( $existing['local_relative_path'] ?? '' ) !== $relative
+					) {
+						$status = (string) ( $existing['remote_status'] ?? '' );
+						if ( ! in_array( $status, array( ObjectRemoteStatus::STALE, ObjectRemoteStatus::DELETED ), true ) ) {
+							return array( 'ok' => false, 'reason' => 'key_owned_by_other_attachment', 'existing' => $existing );
+						}
+					}
+					$rows[ $key ] = array_merge( $existing, $data );
+					return array( 'ok' => true, 'id' => (int) $rows[ $key ]['id'] );
 				}
-				return (int) $rows[ $key ]['id'];
+				$rows[ $key ] = array_merge( $data, array( 'id' => $next_id++ ) );
+				return array( 'ok' => true, 'id' => (int) $rows[ $key ]['id'] );
 			}
 		);
 		$objects->method( 'find_by_attachment' )->willReturnCallback(

@@ -46,7 +46,7 @@ final class AdoptExactKeyTest extends TestCase {
 
 		$objects = $this->createMock( ObjectRepository::class );
 		$objects->expects( $this->once() )
-			->method( 'upsert' )
+			->method( 'insert_owned_or_conflict' )
 			->with(
 				$this->callback(
 					static function ( array $data ): bool {
@@ -55,7 +55,7 @@ final class AdoptExactKeyTest extends TestCase {
 					}
 				)
 			)
-			->willReturn( 1 );
+			->willReturn( array( 'ok' => true, 'id' => 1 ) );
 		$objects->method( 'find_by_attachment' )->willReturn(
 			array(
 				array(
@@ -139,7 +139,7 @@ final class AdoptExactKeyTest extends TestCase {
 
 		$objects = $this->createMock( ObjectRepository::class );
 		$objects->expects( $this->once() )
-			->method( 'upsert' )
+			->method( 'insert_owned_or_conflict' )
 			->with(
 				$this->callback(
 					static function ( array $data ) use ( $source_key ): bool {
@@ -148,7 +148,7 @@ final class AdoptExactKeyTest extends TestCase {
 					}
 				)
 			)
-			->willReturn( 1 );
+			->willReturn( array( 'ok' => true, 'id' => 1 ) );
 		$objects->method( 'find_by_attachment' )->willReturn(
 			array(
 				array(
@@ -473,6 +473,68 @@ final class AdoptExactKeyInMemoryObjectRepository extends ObjectRepository {
 		$data['id']    = $id;
 		$this->rows[]  = $data;
 		return $id;
+	}
+
+	/**
+	 * @param array<string, mixed> $data Row.
+	 * @return array{ok:bool,id?:int,reason?:string,existing?:array<string,mixed>}
+	 */
+	public function insert_owned_or_conflict( array $data ): array {
+		$profile_id = (int) ( $data['storage_profile_id'] ?? 0 );
+		$key        = (string) ( $data['object_key'] ?? '' );
+		$attachment = (int) ( $data['attachment_id'] ?? 0 );
+		$relative   = (string) ( $data['local_relative_path'] ?? '' );
+		if ( $profile_id <= 0 || $key === '' || $attachment <= 0 ) {
+			return array( 'ok' => false, 'reason' => 'invalid_row' );
+		}
+
+		foreach ( $this->rows as $row ) {
+			if ( (int) ( $row['attachment_id'] ?? 0 ) !== $attachment ) {
+				continue;
+			}
+			if ( (int) ( $row['storage_profile_id'] ?? 0 ) !== $profile_id ) {
+				continue;
+			}
+			if ( (string) ( $row['local_relative_path'] ?? '' ) !== $relative ) {
+				continue;
+			}
+			$status = (string) ( $row['remote_status'] ?? '' );
+			if ( in_array( $status, array( ObjectRemoteStatus::STALE, ObjectRemoteStatus::DELETED ), true ) ) {
+				continue;
+			}
+			$existing_key = (string) ( $row['object_key'] ?? '' );
+			if ( $existing_key !== '' && $existing_key !== $key ) {
+				return array(
+					'ok'       => false,
+					'reason'   => 'relative_key_conflict',
+					'existing' => $row,
+				);
+			}
+		}
+
+		$existing = $this->find_by_profile_and_key( $profile_id, $key );
+		if ( $existing === null ) {
+			return array( 'ok' => true, 'id' => $this->upsert( $data ) );
+		}
+		$status      = (string) ( $existing['remote_status'] ?? '' );
+		$reclaimable = in_array( $status, array( ObjectRemoteStatus::STALE, ObjectRemoteStatus::DELETED ), true );
+		$same_owner  = (int) ( $existing['attachment_id'] ?? 0 ) === $attachment
+			&& (string) ( $existing['local_relative_path'] ?? '' ) === $relative;
+		if ( ! $same_owner && ! $reclaimable ) {
+			$reason = (int) ( $existing['attachment_id'] ?? 0 ) !== $attachment
+				? 'key_owned_by_other_attachment'
+				: 'key_owned_by_other_relative';
+			return array( 'ok' => false, 'reason' => $reason, 'existing' => $existing );
+		}
+		foreach ( $this->rows as $index => $row ) {
+			if ( (int) ( $row['id'] ?? 0 ) !== (int) $existing['id'] ) {
+				continue;
+			}
+			$merged               = array_merge( $row, $data, array( 'id' => (int) $row['id'] ) );
+			$this->rows[ $index ] = $merged;
+			return array( 'ok' => true, 'id' => (int) $merged['id'] );
+		}
+		return array( 'ok' => false, 'reason' => 'write_failed' );
 	}
 
 	/**

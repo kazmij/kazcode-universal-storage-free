@@ -22,15 +22,30 @@ final class AttachmentSyncDeriverTest extends TestCase {
 
 	public function test_all_present_is_offloaded(): void {
 		$rows = array(
-			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
-			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a-150.jpg', 'variant_type' => 'size' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a-150.jpg', 'variant_type' => 'size' ),
 		);
 		$this->assertSame( AttachmentOffloader::STATUS_OFFLOADED, AttachmentSyncDeriver::derive_status( $rows ) );
 	}
 
-	public function test_mixed_present_and_failed_is_partial(): void {
+	public function test_present_without_verified_at_is_not_fully_offloaded(): void {
 		$rows = array(
 			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
+		);
+		$this->assertSame( AttachmentOffloader::STATUS_FAILED, AttachmentSyncDeriver::derive_status( $rows ) );
+	}
+
+	public function test_mixed_verified_present_and_existence_only_is_partial(): void {
+		$rows = array(
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a-150.jpg', 'variant_type' => 'size' ),
+		);
+		$this->assertSame( AttachmentOffloader::STATUS_PARTIAL, AttachmentSyncDeriver::derive_status( $rows ) );
+	}
+
+	public function test_mixed_present_and_failed_is_partial(): void {
+		$rows = array(
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
 			array( 'remote_status' => ObjectRemoteStatus::FAILED, 'last_error_message' => 'boom', 'variant_type' => 'size' ),
 		);
 		$this->assertSame( AttachmentOffloader::STATUS_PARTIAL, AttachmentSyncDeriver::derive_status( $rows ) );
@@ -38,7 +53,7 @@ final class AttachmentSyncDeriverTest extends TestCase {
 
 	public function test_mixed_present_and_pending_is_partial(): void {
 		$rows = array(
-			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a.jpg' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg' ),
 			array( 'remote_status' => ObjectRemoteStatus::UPLOADING ),
 		);
 		$this->assertSame( AttachmentOffloader::STATUS_PARTIAL, AttachmentSyncDeriver::derive_status( $rows ) );
@@ -50,8 +65,8 @@ final class AttachmentSyncDeriverTest extends TestCase {
 		// derive as fully offloaded — not `failed` (regression for the bug where
 		// stale/deleted rows silently counted against the present/total ratio).
 		$rows = array(
-			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
-			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a-150x150.jpg', 'variant_type' => 'size' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a-150x150.jpg', 'variant_type' => 'size' ),
 			array( 'remote_status' => ObjectRemoteStatus::STALE, 'object_key' => 'uploads/a-old-150x150.jpg', 'variant_type' => 'size' ),
 		);
 		$this->assertSame( AttachmentOffloader::STATUS_OFFLOADED, AttachmentSyncDeriver::derive_status( $rows ) );
@@ -59,7 +74,7 @@ final class AttachmentSyncDeriverTest extends TestCase {
 
 	public function test_deleted_variant_is_excluded_from_roll_up(): void {
 		$rows = array(
-			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
 			array( 'remote_status' => ObjectRemoteStatus::DELETED, 'object_key' => 'uploads/a-150x150.jpg', 'variant_type' => 'size' ),
 		);
 		$this->assertSame( AttachmentOffloader::STATUS_OFFLOADED, AttachmentSyncDeriver::derive_status( $rows ) );
@@ -74,7 +89,7 @@ final class AttachmentSyncDeriverTest extends TestCase {
 
 	public function test_stale_variant_alongside_real_failure_is_still_partial(): void {
 		$rows = array(
-			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
 			array( 'remote_status' => ObjectRemoteStatus::FAILED, 'last_error_message' => 'boom', 'variant_type' => 'size' ),
 			array( 'remote_status' => ObjectRemoteStatus::STALE, 'object_key' => 'uploads/a-old-150x150.jpg', 'variant_type' => 'size' ),
 		);
@@ -103,5 +118,19 @@ final class AttachmentSyncDeriverTest extends TestCase {
 			array( 'last_error_message' => 'second' ),
 		);
 		$this->assertSame( 'first', AttachmentSyncDeriver::last_error( $rows ) );
+	}
+
+	/**
+	 * Regenerate Thumbnails / Image Editor leave the pre-regen size row as `stale`
+	 * while the new size is `present`. Roll-up must stay offloaded (Scenario E/F).
+	 */
+	public function test_regenerate_thumbnails_style_stale_plus_new_size_stays_offloaded(): void {
+		$rows = array(
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a.jpg', 'variant_type' => 'original' ),
+			array( 'remote_status' => ObjectRemoteStatus::PRESENT, 'verified_at' => '2026-01-01 00:00:00', 'object_key' => 'uploads/a-150x150-v2.jpg', 'variant_type' => 'size' ),
+			array( 'remote_status' => ObjectRemoteStatus::STALE, 'object_key' => 'uploads/a-150x150-v1.jpg', 'variant_type' => 'size' ),
+			array( 'remote_status' => ObjectRemoteStatus::STALE, 'object_key' => 'uploads/a-300x200-v1.jpg', 'variant_type' => 'size' ),
+		);
+		$this->assertSame( AttachmentOffloader::STATUS_OFFLOADED, AttachmentSyncDeriver::derive_status( $rows ) );
 	}
 }

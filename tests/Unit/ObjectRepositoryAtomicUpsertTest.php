@@ -14,6 +14,7 @@ if ( ! defined( 'ARRAY_A' ) ) {
 }
 
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
+use Kazcode\WpStorage\Infrastructure\SchemaMigrator;
 use PHPUnit\Framework\TestCase;
 
 final class ObjectRepositoryAtomicUpsertTest extends TestCase {
@@ -37,7 +38,7 @@ final class ObjectRepositoryAtomicUpsertTest extends TestCase {
 	public function test_schema_uses_full_object_key_hash_not_prefix_unique_index(): void {
 		$source = (string) file_get_contents( dirname( __DIR__, 2 ) . '/includes/Infrastructure/SchemaMigrator.php' );
 
-		$this->assertStringContainsString( 'public const VERSION    = 3;', $source );
+		$this->assertStringContainsString( 'public const VERSION    = ' . SchemaMigrator::VERSION . ';', $source );
 		$this->assertStringContainsString( 'object_key_hash char(64) NOT NULL', $source );
 		$this->assertStringContainsString( 'UNIQUE KEY profile_object_key_hash (storage_profile_id, object_key_hash)', $source );
 		$this->assertStringContainsString( 'DROP INDEX', $source );
@@ -80,6 +81,130 @@ final class ObjectRepositoryAtomicUpsertTest extends TestCase {
 		$this->assertStringNotContainsString( 'created_at = VALUES(created_at)', $wpdb->queries[0] );
 	}
 
+	public function test_insert_owned_or_conflict_emits_null_literals_for_cleared_verification(): void {
+		$wpdb = new AtomicUpsertWpdbFake();
+		$wpdb->insert_id_after_query = 55;
+		$wpdb->returned_row          = array(
+			'id'                  => 55,
+			'attachment_id'       => 99,
+			'storage_profile_id'  => 10,
+			'local_relative_path' => '2026/09/a.jpg',
+			'object_key'          => 'same-prefix/a.jpg',
+			'remote_status'       => 'present',
+			'size_bytes'          => null,
+			'verified_at'         => null,
+		);
+		$GLOBALS['wpdb'] = $wpdb;
+
+		$row               = $this->row( 'same-prefix/a.jpg' );
+		$row['size_bytes'] = null;
+		$row['verified_at'] = null;
+		$result            = ( new ObjectRepository() )->insert_owned_or_conflict( $row );
+
+		$this->assertTrue( $result['ok'] );
+		$sql = $this->owned_insert_sql( $wpdb );
+		$this->assertMatchesRegularExpression( '/size_bytes[,)].*NULL/s', $sql );
+		$this->assertMatchesRegularExpression( '/verified_at[,)].*NULL/s', $sql );
+		$this->assertStringContainsString( 'VALUES (', $sql );
+	}
+
+	public function test_insert_owned_or_conflict_uses_owner_preserving_odku_not_blind_upsert(): void {
+		$wpdb = new AtomicUpsertWpdbFake();
+		$wpdb->insert_id_after_query = 321;
+		$wpdb->returned_row          = array(
+			'id'                  => 321,
+			'attachment_id'       => 99,
+			'storage_profile_id'  => 10,
+			'local_relative_path' => '2026/09/a.jpg',
+			'object_key'          => 'same-prefix/a.jpg',
+			'remote_status'       => 'present',
+		);
+		$GLOBALS['wpdb'] = $wpdb;
+
+		$result = ( new ObjectRepository() )->insert_owned_or_conflict( $this->row( 'same-prefix/a.jpg' ) );
+
+		$this->assertTrue( $result['ok'] );
+		$this->assertSame( 321, $result['id'] );
+		$sql = $this->owned_insert_sql( $wpdb );
+		$this->assertStringContainsString( 'ON DUPLICATE KEY UPDATE', $sql );
+		$this->assertStringContainsString( "remote_status IN ('stale','deleted')", $sql );
+		$this->assertStringContainsString( 'attachment_id = VALUES(attachment_id) AND BINARY local_relative_path = BINARY VALUES(local_relative_path)', $sql );
+		$this->assertStringContainsString( 'VALUES(attachment_id), attachment_id)', $sql );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'GET_LOCK' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'START TRANSACTION' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'FOR UPDATE' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'COMMIT' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'RELEASE_LOCK' ) );
+	}
+
+	public function test_insert_owned_or_conflict_reports_conflict_when_existing_owner_differs_after_odku(): void {
+		$wpdb = new AtomicUpsertWpdbFake();
+		$wpdb->insert_id_after_query = 321;
+		$wpdb->returned_row          = array(
+			'id'                  => 321,
+			'attachment_id'       => 50,
+			'storage_profile_id'  => 10,
+			'local_relative_path' => 'other.jpg',
+			'object_key'          => 'same-prefix/a.jpg',
+			'remote_status'       => 'missing',
+		);
+		$GLOBALS['wpdb'] = $wpdb;
+
+		$result = ( new ObjectRepository() )->insert_owned_or_conflict( $this->row( 'same-prefix/a.jpg' ) );
+
+		$this->assertFalse( $result['ok'] );
+		$this->assertSame( 'key_owned_by_other_attachment', $result['reason'] );
+		$this->assertSame( 50, (int) $result['existing']['attachment_id'] );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'ROLLBACK' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'RELEASE_LOCK' ) );
+	}
+
+	public function test_insert_owned_or_conflict_refuses_relative_key_conflict_inside_transaction(): void {
+		$wpdb = new AtomicUpsertWpdbFake();
+		$wpdb->locked_relative_rows = array(
+			array(
+				'id'                  => 11,
+				'attachment_id'       => 99,
+				'storage_profile_id'  => 10,
+				'local_relative_path' => '2026/09/a.jpg',
+				'object_key'          => 'other-prefix/a.jpg',
+				'remote_status'       => 'present',
+			),
+		);
+		$GLOBALS['wpdb'] = $wpdb;
+
+		$result = ( new ObjectRepository() )->insert_owned_or_conflict( $this->row( 'same-prefix/a.jpg' ) );
+
+		$this->assertFalse( $result['ok'] );
+		$this->assertSame( 'relative_key_conflict', $result['reason'] );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'GET_LOCK' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'START TRANSACTION' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'FOR UPDATE' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'ROLLBACK' ) );
+		$this->assertTrue( $this->queries_contain( $wpdb, 'RELEASE_LOCK' ) );
+	}
+
+	/**
+	 * @return string
+	 */
+	private function owned_insert_sql( AtomicUpsertWpdbFake $wpdb ): string {
+		foreach ( $wpdb->queries as $query ) {
+			if ( str_contains( $query, 'INSERT INTO' ) ) {
+				return $query;
+			}
+		}
+		$this->fail( 'Expected owner-preserving INSERT query.' );
+	}
+
+	private function queries_contain( AtomicUpsertWpdbFake $wpdb, string $needle ): bool {
+		foreach ( $wpdb->queries as $query ) {
+			if ( str_contains( $query, $needle ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	public function test_upsert_treats_zero_affected_rows_as_success_when_database_returns_id(): void {
 		$wpdb = new AtomicUpsertWpdbFake();
 		$wpdb->query_result = 0;
@@ -119,6 +244,24 @@ final class ObjectRepositoryAtomicUpsertTest extends TestCase {
 		( new ObjectRepository() )->upsert( $this->row( 'same-prefix/b.jpg' ) );
 	}
 
+	public function test_find_by_profile_and_key_uses_object_key_hash_not_collated_text(): void {
+		$wpdb = new AtomicUpsertWpdbFake();
+		$wpdb->returned_row = array(
+			'id'                 => 55,
+			'storage_profile_id' => 10,
+			'object_key'         => 'Case/Key.jpg',
+			'object_key_hash'    => hash( 'sha256', 'Case/Key.jpg' ),
+		);
+		$GLOBALS['wpdb'] = $wpdb;
+
+		$row = ( new ObjectRepository() )->find_by_profile_and_key( 10, 'Case/Key.jpg' );
+
+		$this->assertNotNull( $row );
+		$this->assertStringContainsString( 'object_key_hash', $wpdb->queries[0] );
+		$this->assertStringContainsString( hash( 'sha256', 'Case/Key.jpg' ), $wpdb->queries[0] );
+		$this->assertStringNotContainsString( 'object_key = ', $wpdb->queries[0] );
+	}
+
 	/**
 	 * @return array<string, mixed>
 	 */
@@ -146,6 +289,9 @@ final class AtomicUpsertWpdbFake {
 	public int $insert_id_after_query = 123;
 	public ?array $returned_row = null;
 
+	/** @var list<array<string, mixed>> */
+	public array $locked_relative_rows = array();
+
 	/** @var list<string> */
 	public array $queries = array();
 
@@ -161,17 +307,32 @@ final class AtomicUpsertWpdbFake {
 		return $query;
 	}
 
-	public function get_var( string $query ): mixed { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+	public function get_var( string $query ): mixed {
+		$this->queries[] = $query;
+		if ( str_contains( $query, 'GET_LOCK' ) || str_contains( $query, 'RELEASE_LOCK' ) ) {
+			return 1;
+		}
 		++$this->get_var_calls;
 		throw new \RuntimeException( 'upsert must not SELECT before INSERT.' );
 	}
 
 	public function query( string $query ): int|false {
 		$this->queries[] = $query;
+		if ( str_starts_with( $query, 'START TRANSACTION' ) || str_starts_with( $query, 'COMMIT' ) || str_starts_with( $query, 'ROLLBACK' ) ) {
+			return 1;
+		}
 		if ( $this->query_result !== false ) {
 			$this->insert_id = $this->insert_id_after_query;
 		}
 		return $this->query_result;
+	}
+
+	/**
+	 * @return list<array<string, mixed>>
+	 */
+	public function get_results( string $query, mixed $output = null ): array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		$this->queries[] = $query;
+		return $this->locked_relative_rows;
 	}
 
 	public function get_row( string $query, mixed $output = null ): ?array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter

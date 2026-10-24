@@ -11,10 +11,12 @@ namespace Kazcode\WpStorage\Services;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Domain\StorageProfile;
 use Kazcode\WpStorage\Storage\ProfileStorageGateway;
+use Kazcode\WpStorage\Storage\ObjectKeyService;
 use Kazcode\WpStorage\Storage\S3Storage;
 
 /**
@@ -64,6 +66,107 @@ final class ProfileAwareObjectOperations {
 		}
 
 		return $this->unresolved_result( $location );
+	}
+
+	/**
+	 * HEAD the exact object an inventory row is bound to (its own profile, never a default fallback).
+	 *
+	 * @param array<string, mixed> $row Object row from s3ms_objects.
+	 * @return array{exists:bool,confirmed_missing?:bool,error?:string,content_length?:int,location_status:string,legacy_fallback:bool,storage_profile_id?:int,object_key?:string}
+	 */
+	public function head_object_row( array $row ): array {
+		$location = $this->locator->locate_inventory_row( $row );
+		if ( ! $location->is_found() || $location->storage_profile === null ) {
+			return $this->unresolved_result( $location );
+		}
+		$result = $this->gateway( $location )->head_key( $location->object_key );
+		$result['location_status']    = $location->status;
+		$result['legacy_fallback']    = false;
+		$result['storage_profile_id'] = $location->storage_profile->id;
+		$result['object_key']         = $location->object_key;
+		return $result;
+	}
+
+	/**
+	 * Download using a preflight-resolved profile/key (or legacy fallback).
+	 *
+	 * Does not re-locate: profile_id / object_key / legacy_fallback are authoritative.
+	 * When expected_size is an int (including 0), the download is size-validated
+	 * before the final path is replaced.
+	 *
+	 * @return array{success:bool,location_status:string,legacy_fallback:bool,error?:string}
+	 */
+	public function download_resolved_to_local(
+		int $attachment_id,
+		string $relative,
+		string $local_path,
+		?int $profile_id,
+		string $object_key,
+		bool $legacy_fallback,
+		?int $expected_size = null
+	): array {
+		unset( $attachment_id );
+		if ( $legacy_fallback ) {
+			if ( $this->legacy === null ) {
+				return array(
+					'success'         => false,
+					'location_status' => ProfileObjectLocation::NOT_IN_INVENTORY,
+					'legacy_fallback' => true,
+					'error'           => 'legacy_storage_unavailable',
+				);
+			}
+			try {
+				$this->legacy->download_relative( $relative, $local_path, $expected_size );
+			} catch ( \Throwable $e ) {
+				return array(
+					'success'         => false,
+					'location_status' => ProfileObjectLocation::NOT_IN_INVENTORY,
+					'legacy_fallback' => true,
+					'error'           => SecretRedactor::redact( $e ),
+				);
+			}
+			return array(
+				'success'         => true,
+				'location_status' => ProfileObjectLocation::NOT_IN_INVENTORY,
+				'legacy_fallback' => true,
+			);
+		}
+
+		if ( $profile_id === null || $profile_id <= 0 || $object_key === '' ) {
+			return array(
+				'success'         => false,
+				'location_status' => ProfileObjectLocation::OBJECT_KEY_MISSING,
+				'legacy_fallback' => false,
+				'error'           => 'resolved_location_incomplete',
+			);
+		}
+
+		$profiles = new \Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository();
+		$profile  = $profiles->find( $profile_id );
+		if ( $profile === null ) {
+			return array(
+				'success'         => false,
+				'location_status' => ProfileObjectLocation::PROFILE_MISSING,
+				'legacy_fallback' => false,
+				'error'           => 'profile_missing',
+			);
+		}
+
+		try {
+			$this->gateways->gateway_for_profile( $profile )->download_key_to_local( $object_key, $local_path, $expected_size );
+		} catch ( \Throwable $e ) {
+			return array(
+				'success'         => false,
+				'location_status' => ProfileObjectLocation::FOUND,
+				'legacy_fallback' => false,
+				'error'           => SecretRedactor::redact( $e ),
+			);
+		}
+		return array(
+			'success'         => true,
+			'location_status' => ProfileObjectLocation::FOUND,
+			'legacy_fallback' => false,
+		);
 	}
 
 	/**
@@ -130,6 +233,59 @@ final class ProfileAwareObjectOperations {
 		}
 	}
 
+	/** Delete one immutable Direct Upload binding only if its profile location is unchanged. */
+	public function delete_exact_profile_key( int $profile_id, string $object_key, string $profile_fingerprint ): bool {
+		if ( $profile_id < 1 || $object_key === '' || $profile_fingerprint === '' ) {
+			return false;
+		}
+		try {
+			$profile = ( new \Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository() )->find( $profile_id );
+			if ( $profile === null || ! hash_equals( $profile_fingerprint, $this->profile_location_fingerprint( $profile ) ) ) {
+				return false;
+			}
+			$this->gateways->gateway_for_profile( $profile )->delete_key( $object_key );
+		} catch ( \Throwable $error ) {
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Abort one durably-authorized multipart upload, prove its provider state is
+	 * gone (or empty), then prove no object remains at its exact destination.
+	 * A timeout or ambiguous list/head result deliberately retains cleanup.
+	 */
+	public function settle_exact_multipart_cleanup( int $profile_id, string $object_key, string $profile_fingerprint, string $upload_id ): bool {
+		if ( $profile_id < 1 || $object_key === '' || $profile_fingerprint === '' || $upload_id === '' ) return false;
+		try {
+			$profile = ( new \Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository() )->find( $profile_id );
+			if ( $profile === null || ! hash_equals( $profile_fingerprint, $this->profile_location_fingerprint( $profile ) ) ) return false;
+			$gateway = $this->gateways->gateway_for_profile( $profile );
+			try { $gateway->abort_multipart_upload( $object_key, $upload_id ); } catch ( \Throwable $error ) {
+				// A prior cleanup attempt can have completed Abort before failing its
+				// subsequent delete/HEAD proof. The provider's authoritative absence is
+				// therefore settled, but unknown abort failures remain fail-closed.
+				if ( ! $this->is_missing_multipart_upload_error( $error ) ) return false;
+			}
+			try {
+				$parts = $gateway->list_parts( $object_key, $upload_id );
+				if ( ! is_array( $parts ) || $parts !== array() ) return false;
+			} catch ( \Throwable $error ) {
+				if ( ! $this->is_missing_multipart_upload_error( $error ) ) return false;
+			}
+			$gateway->delete_key( $object_key );
+			$head = $gateway->head_key( $object_key );
+			return empty( $head['exists'] ) && ! empty( $head['confirmed_missing'] );
+		} catch ( \Throwable $error ) {
+			return false;
+		}
+	}
+
+	private function is_missing_multipart_upload_error( \Throwable $error ): bool {
+		$code = method_exists( $error, 'getAwsErrorCode' ) ? (string) $error->getAwsErrorCode() : (string) $error->getCode();
+		return in_array( $code, array( 'NoSuchUpload', 'NoSuchKey', '404' ), true );
+	}
+
 	/**
 	 * @param array<string, mixed> $row
 	 * @return array{success:bool,location_status:string,legacy_fallback:bool,head?:array<string,mixed>,storage_profile_id?:int}
@@ -163,6 +319,11 @@ final class ProfileAwareObjectOperations {
 
 	private function gateway( ProfileObjectLocation $location ): ProfileStorageGateway {
 		return $this->gateways->gateway_for_profile( $location->storage_profile );
+	}
+
+	private function profile_location_fingerprint( StorageProfile $profile ): string {
+		$values = array( 'profile_id' => $profile->id, 'provider_type' => $profile->provider_type, 'bucket' => $profile->bucket, 'region' => $profile->region, 'endpoint' => $profile->endpoint, 'path_style' => $profile->path_style ? 1 : 0, 'prefix' => ObjectKeyService::normalize_prefix( $profile->prefix ), 'credentials_ref' => $profile->credentials_ref );
+		return hash( 'sha256', json_encode( $values, JSON_THROW_ON_ERROR ) );
 	}
 
 	private function can_use_legacy_fallback( ProfileObjectLocation $location, bool $allow ): bool {

@@ -11,7 +11,9 @@ namespace Kazcode\WpStorage\Storage;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Core\SafeMode;
 
 /**
  * Put / Head / Delete wrappers. ACL is never set (bucket-owner-enforced friendly).
@@ -76,6 +78,7 @@ final class S3Storage implements StorageGatewayInterface {
 	}
 
 	public function put_object_from_file( string $key, string $local_path, string $content_type, string $cache_control ): void {
+		$this->guard_write( 'put_object_from_file' );
 		$params = array(
 			'Bucket'      => $this->bucket(),
 			'Key'         => $key,
@@ -90,6 +93,7 @@ final class S3Storage implements StorageGatewayInterface {
 	}
 
 	public function create_multipart_upload( string $key, string $content_type, string $cache_control ): string {
+		$this->guard_write( 'create_multipart_upload' );
 		$params = array(
 			'Bucket'      => $this->bucket(),
 			'Key'         => $key,
@@ -104,6 +108,7 @@ final class S3Storage implements StorageGatewayInterface {
 	}
 
 	public function upload_part( string $key, string $upload_id, int $part_number, $body, int $content_length ): string {
+		$this->guard_write( 'upload_part' );
 		$result = $this->client()->uploadPart(
 			array(
 				'Bucket'        => $this->bucket(),
@@ -115,6 +120,20 @@ final class S3Storage implements StorageGatewayInterface {
 			)
 		);
 		return $this->normalize_etag( (string) $result->get( 'ETag' ) );
+	}
+
+	/**
+	 * Create a short-lived browser UploadPart URL for an already-authorized
+	 * exact multipart identity. Callers must never derive these values from
+	 * browser input.
+	 */
+	public function presign_upload_part( string $key, string $upload_id, int $part_number, int $ttl_seconds ): string {
+		$this->guard_write( 'presign_upload_part' );
+		if ( $key === '' || $upload_id === '' || $part_number < 1 || $part_number > 10000 || $ttl_seconds < 1 ) {
+			throw new \InvalidArgumentException( 'A complete multipart upload-part identity is required.' );
+		}
+		$command = $this->client()->getCommand( 'UploadPart', array( 'Bucket' => $this->bucket(), 'Key' => $key, 'UploadId' => $upload_id, 'PartNumber' => $part_number ) );
+		return (string) $this->client()->createPresignedRequest( $command, '+' . min( 900, $ttl_seconds ) . ' seconds' )->getUri();
 	}
 
 	/**
@@ -156,9 +175,63 @@ final class S3Storage implements StorageGatewayInterface {
 	}
 
 	/**
+	 * List incomplete multipart uploads for one exact, server-authorized key.
+	 *
+	 * S3 only offers prefix listing, so callers must never infer that a prefix
+	 * match belongs to their attempt. A truncated response without continuation
+	 * markers is ambiguous and deliberately fails instead of looking empty.
+	 *
+	 * @return list<array{upload_id:string,initiated_at:string}>
+	 */
+	public function list_multipart_uploads_for_key( string $key ): array {
+		if ( $key === '' ) {
+			throw new \InvalidArgumentException( 'An exact multipart object key is required.' );
+		}
+
+		$uploads          = array();
+		$key_marker       = null;
+		$upload_id_marker = null;
+
+		do {
+			$params = array(
+				'Bucket' => $this->bucket(),
+				'Prefix' => $key,
+			);
+			if ( $key_marker !== null && $upload_id_marker !== null ) {
+				$params['KeyMarker']      = $key_marker;
+				$params['UploadIdMarker'] = $upload_id_marker;
+			}
+
+			$result = $this->client()->listMultipartUploads( $params );
+			foreach ( $result->get( 'Uploads' ) ?? array() as $upload ) {
+				if ( (string) ( $upload['Key'] ?? '' ) !== $key || (string) ( $upload['UploadId'] ?? '' ) === '' ) {
+					continue;
+				}
+				$initiated_at = $upload['Initiated'] ?? '';
+				$uploads[] = array(
+					'upload_id'    => (string) $upload['UploadId'],
+					'initiated_at' => $initiated_at instanceof \DateTimeInterface ? $initiated_at->format( DATE_ATOM ) : (string) $initiated_at,
+				);
+			}
+
+			if ( ! (bool) ( $result->get( 'IsTruncated' ) ?? false ) ) {
+				break;
+			}
+			$key_marker       = (string) ( $result->get( 'NextKeyMarker' ) ?? '' );
+			$upload_id_marker = (string) ( $result->get( 'NextUploadIdMarker' ) ?? '' );
+			if ( $key_marker === '' || $upload_id_marker === '' ) {
+				throw new \RuntimeException( 'Incomplete multipart listing continuation is ambiguous.' );
+			}
+		} while ( true );
+
+		return $uploads;
+	}
+
+	/**
 	 * @param array<int,array{etag:string,size?:int}> $parts
 	 */
 	public function complete_multipart_upload( string $key, string $upload_id, array $parts ): void {
+		$this->guard_write( 'complete_multipart_upload' );
 		ksort( $parts );
 		$complete_parts = array();
 		foreach ( $parts as $part_number => $part ) {
@@ -181,6 +254,7 @@ final class S3Storage implements StorageGatewayInterface {
 	}
 
 	public function abort_multipart_upload( string $key, string $upload_id ): void {
+		$this->guard_write( 'abort_multipart_upload' );
 		try {
 			$this->client()->abortMultipartUpload(
 				array(
@@ -281,35 +355,47 @@ final class S3Storage implements StorageGatewayInterface {
 			$confirmed_missing = $this->is_missing_object_error($e);
 			if (!$confirmed_missing && defined('WP_DEBUG') && WP_DEBUG) {
 				// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				error_log('KAZCODE Universal Storage head_key transient error for key ' . $key . ': ' . $e->getMessage());
+				error_log('KAZCODE Universal Storage head_key transient error for key ' . $key . ': ' . SecretRedactor::redact($e));
+			}
+			$error_code  = method_exists( $e, 'getAwsErrorCode' ) ? (string) $e->getAwsErrorCode() : '';
+			$status_code = 0;
+			if ( method_exists( $e, 'getStatusCode' ) ) {
+				$status_code = (int) $e->getStatusCode();
+			} elseif ( method_exists( $e, 'getAwsStatusCode' ) ) {
+				$status_code = (int) $e->getAwsStatusCode();
 			}
 			return array(
 				'exists'            => false,
 				'confirmed_missing' => $confirmed_missing,
-				'error'             => $confirmed_missing ? '' : $e->getMessage(),
+				'error'             => $confirmed_missing ? '' : SecretRedactor::redact( $e ),
+				'error_code'        => $error_code,
+				'status_code'       => $status_code,
 			);
 		}
 	}
 
 	/**
-	 * Download object to a local path.
+	 * Download object to a local path via temp → optional size validate → atomic rename.
 	 *
-	 * @param string $relative   Relative uploads path.
-	 * @param string $local_path Destination filesystem path.
+	 * @param string   $relative      Relative uploads path.
+	 * @param string   $local_path    Destination filesystem path.
+	 * @param int|null $expected_size Trustworthy byte length, or null when unknown.
+	 *                                Zero is a valid expected size and is validated.
 	 */
-	public function download_relative(string $relative, string $local_path): void {
+	public function download_relative(string $relative, string $local_path, ?int $expected_size = null): void {
 		$key = $this->keys->resolve($relative);
-		$dir = dirname($local_path);
-		if (!is_dir($dir) && !wp_mkdir_p($dir)) {
-			throw new \RuntimeException('Unable to create local directory for download.');
-		}
-
-		$this->client()->getObject(
-			array(
-				'Bucket' => $this->bucket(),
-				'Key'    => $key,
-				'SaveAs' => $local_path,
-			)
+		AtomicLocalDownload::install(
+			$local_path,
+			function (string $temp_path) use ($key): void {
+				$this->client()->getObject(
+					array(
+						'Bucket' => $this->bucket(),
+						'Key'    => $key,
+						'SaveAs' => $temp_path,
+					)
+				);
+			},
+			$expected_size
 		);
 	}
 
@@ -322,6 +408,7 @@ final class S3Storage implements StorageGatewayInterface {
 	 * @param list<string> $keys Object keys.
 	 */
 	public function delete_keys(array $keys): void {
+		$this->guard_write( 'delete_keys' );
 		$keys = array_values(array_unique(array_filter($keys)));
 		if ($keys === array()) {
 			return;
@@ -340,6 +427,7 @@ final class S3Storage implements StorageGatewayInterface {
 	 * Delete a single object key (idempotent when already absent).
 	 */
 	public function delete_key(string $key): void {
+		$this->guard_write( 'delete_key' );
 		if ($key === '') {
 			return;
 		}
@@ -400,10 +488,19 @@ final class S3Storage implements StorageGatewayInterface {
 
 	private function is_missing_object_error(\Throwable $e): bool {
 		$code = method_exists($e, 'getAwsErrorCode') ? (string) $e->getAwsErrorCode() : '';
-		if (method_exists($e, 'getStatusCode') && (int) $e->getStatusCode() === 404) {
+		// Bucket-level / location failures are not object-level confirmed missing.
+		if (in_array($code, array('NoSuchBucket', 'InvalidBucketName', 'PermanentRedirect', 'AuthorizationHeaderMalformed'), true)) {
+			return false;
+		}
+		if (in_array($code, array('NoSuchKey', 'NotFound'), true)) {
 			return true;
 		}
-		return in_array($code, array('NoSuchKey', 'NotFound', '404'), true);
+		$status = method_exists($e, 'getStatusCode') ? (int) $e->getStatusCode() : 0;
+		// Bare HTTP 404 with no AWS object/bucket code — treat as object absence (S3-compatible quirk).
+		if ($status === 404 && ($code === '' || $code === '404')) {
+			return true;
+		}
+		return false;
 	}
 
 	private function is_missing_multipart_upload_error( \Throwable $e ): bool {
@@ -525,5 +622,43 @@ final class S3Storage implements StorageGatewayInterface {
 			}
 		}
 		return $mime !== '' ? $mime : 'application/octet-stream';
+	}
+
+	/**
+	 * Safe Mode (#61): refuse writes on a cloned site or a namespace owned by another site.
+	 */
+	private function guard_write( string $operation ): void {
+		SafeMode::guard_write(
+			$operation,
+			$this->bucket(),
+			(string) $this->settings->get( 'object_prefix', '' ),
+			function (): ?array {
+				try {
+					$result = $this->client()->getObject(
+						array(
+							'Bucket' => $this->bucket(),
+							'Key'    => SafeMode::marker_key( (string) $this->settings->get( 'object_prefix', '' ) ),
+						)
+					);
+				} catch ( \Throwable $e ) {
+					if ( $this->is_missing_object_error( $e ) ) {
+						return null;
+					}
+					throw $e;
+				}
+				$decoded = json_decode( (string) $result['Body'], true );
+				return is_array( $decoded ) ? $decoded : array();
+			},
+			function ( array $payload ): void {
+				$this->client()->putObject(
+					array(
+						'Bucket'      => $this->bucket(),
+						'Key'         => SafeMode::marker_key( (string) $this->settings->get( 'object_prefix', '' ) ),
+						'Body'        => (string) wp_json_encode( $payload ),
+						'ContentType' => 'application/json',
+					)
+				);
+			}
+		);
 	}
 }

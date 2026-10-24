@@ -65,6 +65,10 @@ final class MigrationPage {
 			);
 			AdminLayout::subnav( AdminMenu::MIGRATION_SLUG );
 			?>
+			<div class="notice notice-info inline s3ms-notice" data-integrity-link><p>
+				<?php esc_html_e( 'Recovery — verify, repair, rebuild inventory and restore preflight — is gathered in Integrity.', 'kazcode-universal-storage' ); ?>
+				<a href="<?php echo esc_url( IntegrityPage::url() ); ?>"><?php esc_html_e( 'Open Integrity', 'kazcode-universal-storage' ); ?></a>
+			</p></div>
 			<?php AdminLayout::tour_replay_button( 5 ); ?>
 
 			<div class="notice notice-info inline s3ms-notice"><p><?php esc_html_e( 'Reminder: images hard-coded in the theme (e.g. /wp-content/themes/.../assets/) are not Media Library items and will never show S3 URLs. Only attachments are offloaded.', 'kazcode-universal-storage' ); ?></p></div>

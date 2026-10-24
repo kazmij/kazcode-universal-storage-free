@@ -80,7 +80,12 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 		}
 	}
 
-	public function test_keep_originals_deletes_size_variants_only(): void {
+	/**
+	 * The legacy (non-inventory) offload path writes no s3ms_objects rows, so
+	 * CleanupEligibility can never confirm durable inventory and keeps every
+	 * local file (#53) — even under keep_originals with a verified HEAD.
+	 */
+	public function test_legacy_path_without_inventory_keeps_size_variants(): void {
 		$files = array(
 			'2026/08/photo.jpg'         => $this->touch_file('2026/08/photo.jpg'),
 			'2026/08/photo-150x150.jpg' => $this->touch_file('2026/08/photo-150x150.jpg'),
@@ -105,7 +110,8 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 
 		$this->assertTrue($result['success']);
 		$this->assertFileExists($files['2026/08/photo.jpg']);
-		$this->assertFileDoesNotExist($files['2026/08/photo-150x150.jpg']);
+		$this->assertFileExists($files['2026/08/photo-150x150.jpg']);
+		$this->assertSame(array(), WpStubs::$deleted_files);
 	}
 
 	public function test_verify_before_delete_true_skips_local_delete_when_head_fails(): void {
@@ -224,18 +230,23 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 
 		$this->assertSame(AttachmentOffloader::STATUS_OFFLOADED, WpStubs::$post_meta[ $id ]['_s3ms_status'] ?? null);
 		$this->assertSame(2, $upload_count, 'both the original and the one size variant should have been uploaded exactly once');
-		$this->assertFileDoesNotExist($files['2026/08/photo.jpg'], 'remote_only policy deletes the original once verified on S3');
-		$this->assertFileDoesNotExist($files['2026/08/photo-150x150.jpg'], 'remote_only policy deletes size variants once verified on S3');
+		// Legacy path: no durable inventory, so cleanup is blocked (#53).
+		$this->assertFileExists($files['2026/08/photo.jpg'], 'no local delete without durable inventory');
+		$this->assertFileExists($files['2026/08/photo-150x150.jpg'], 'no local delete without durable inventory');
 
 		// 4) WP core's own paired wp_update_attachment_metadata( $id, wp_generate_attachment_metadata(...) )
 		// call, same request, same metadata — not a new event. Must be a no-op: it must
-		// NOT re-attempt an offload (which would fail with "no local files found" since
-		// step 3 already correctly deleted them) and must NOT clobber the offloaded status.
+		// NOT re-attempt an offload (under a cleanup that did delete locals it would fail
+		// with "no local files found") and must NOT clobber the offloaded status.
 		$offloader->on_update_metadata($real_meta, $id);
 
 		$this->assertSame(AttachmentOffloader::STATUS_OFFLOADED, WpStubs::$post_meta[ $id ]['_s3ms_status'] ?? null, 'the paired update call must not downgrade status to failed');
 		$this->assertSame(2, $upload_count, 'the paired update call must not re-upload anything');
-		$this->assertArrayNotHasKey('_s3ms_last_error', WpStubs::$post_meta[ $id ] ?? array());
+		// Only the sanitized cleanup-skip reason (#53) may be recorded — never an offload failure.
+		$this->assertStringStartsWith(
+			'Offloaded but local delete skipped (',
+			(string) ( WpStubs::$post_meta[ $id ]['_s3ms_last_error'] ?? '' )
+		);
 	}
 
 	/**
@@ -312,8 +323,8 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 
 		$this->assertSame(2, $upload_count, 'the paired update call must upload the regenerated files, not be skipped');
 		$this->assertSame(AttachmentOffloader::STATUS_OFFLOADED, WpStubs::$post_meta[ $id ]['_s3ms_status'] ?? null);
-		$this->assertFileDoesNotExist($files['2026/08/photo.jpg']);
-		$this->assertFileDoesNotExist($files['2026/08/photo-150x150.jpg']);
+		$this->assertFileExists($files['2026/08/photo.jpg'], 'legacy path keeps locals without durable inventory (#53)');
+		$this->assertFileExists($files['2026/08/photo-150x150.jpg']);
 	}
 
 	/**

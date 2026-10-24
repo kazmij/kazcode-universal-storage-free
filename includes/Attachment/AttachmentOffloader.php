@@ -11,6 +11,7 @@ namespace Kazcode\WpStorage\Attachment;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
@@ -250,11 +251,12 @@ final class AttachmentOffloader {
 
 		try {
 			if (ObjectOffloadService::is_enabled()) {
+				$this->renew_or_abort($lease, 'object offload start');
 				update_post_meta($attachment_id, '_s3ms_status', self::STATUS_UPLOADING);
 				delete_post_meta($attachment_id, '_s3ms_last_error');
 
 				$service = new ObjectOffloadService($this->settings, $this->storage, $this->files);
-				$result = $service->offload($attachment_id, $delete_local, $metadata_override);
+				$result = $service->offload($attachment_id, $delete_local, $metadata_override, $lease, $this->lock);
 				$this->renew_or_abort($lease, 'object offload commit');
 				return $result;
 			}
@@ -337,10 +339,10 @@ final class AttachmentOffloader {
 				$manifest_items,
 				$delete_local
 			);
-			if ( $cleanup['skipped'] && str_contains( $cleanup['message'], 'verify failure' ) ) {
+			if ( ! empty( $cleanup['blocked_reason'] ) ) {
 				return array(
 					'success' => true,
-					'message' => 'Offloaded; local delete skipped after verify failure.',
+					'message' => 'Offloaded; local delete skipped (' . $cleanup['blocked_reason'] . ').',
 					'files'   => count( $uploaded_keys ),
 					'keys'    => $uploaded_keys,
 				);
@@ -414,12 +416,6 @@ final class AttachmentOffloader {
 	 * User-safe error string (no credentials / long SDK dumps).
 	 */
 	private function safe_error_message(\Throwable $e): string {
-		$msg = $e->getMessage();
-		$msg = preg_replace('/AKIA[0-9A-Z]{16}/', '[ACCESS_KEY]', $msg) ?? $msg;
-		$msg = preg_replace('/(?i)(secret|password|token)=\\S+/', '$1=[REDACTED]', $msg) ?? $msg;
-		if (strlen($msg) > 300) {
-			$msg = substr($msg, 0, 297) . '...';
-		}
-		return $msg;
+		return SecretRedactor::redact( $e, 300 );
 	}
 }

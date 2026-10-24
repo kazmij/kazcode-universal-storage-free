@@ -22,6 +22,7 @@ final class AdminMenu {
 	public const STORAGE_SLUG        = 'kazcode-universal-storage-storage';
 	public const MIGRATION_SLUG      = 'kazcode-universal-storage-migration';
 	public const HEALTH_SLUG         = 'kazcode-universal-storage-health';
+	public const INTEGRITY_SLUG      = 'kazcode-universal-storage-integrity';
 	public const LOGS_SLUG           = 'kazcode-universal-storage-logs';
 	public const SETTINGS_SLUG       = 'kazcode-universal-storage-settings';
 	public const STORAGE_WIZARD_SLUG = 'kazcode-universal-storage-storage-wizard';
@@ -43,6 +44,7 @@ final class AdminMenu {
 	private LogsPage $logs_page;
 	private SettingsPage $settings_page;
 	private SetupWizardPage $wizard_page;
+	private IntegrityPage $integrity_page;
 
 	public function __construct(
 		DashboardPage $dashboard_page,
@@ -52,7 +54,8 @@ final class AdminMenu {
 		HealthPage $health_page,
 		LogsPage $logs_page,
 		SettingsPage $settings_page,
-		SetupWizardPage $wizard_page
+		SetupWizardPage $wizard_page,
+		?IntegrityPage $integrity_page = null
 	) {
 		$this->dashboard_page = $dashboard_page;
 		$this->media_page     = $media_page;
@@ -62,6 +65,7 @@ final class AdminMenu {
 		$this->logs_page      = $logs_page;
 		$this->settings_page  = $settings_page;
 		$this->wizard_page    = $wizard_page;
+		$this->integrity_page = $integrity_page ?? new IntegrityPage();
 	}
 
 	/**
@@ -149,6 +153,15 @@ final class AdminMenu {
 			'manage_options',
 			self::HEALTH_SLUG,
 			array( $this->health_page, 'render' )
+		);
+
+		add_submenu_page(
+			self::MENU_SLUG,
+			__( 'Integrity', 'kazcode-universal-storage' ),
+			__( 'Integrity', 'kazcode-universal-storage' ),
+			'manage_options',
+			self::INTEGRITY_SLUG,
+			array( $this->integrity_page, 'render' )
 		);
 
 		add_submenu_page(

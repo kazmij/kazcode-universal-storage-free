@@ -18,6 +18,9 @@ final class WpOffloadMediaImporter implements ImporterInterface {
 	private const OPTION_KEY   = 'tantan_wordpress_s3';
 	private const SOURCE_TYPE  = 'media-library';
 
+	private ?bool $items_table_exists = null;
+	private ?bool $files_table_exists = null;
+
 	public function id(): string {
 		return self::SOURCE_ID;
 	}
@@ -97,6 +100,22 @@ final class WpOffloadMediaImporter implements ImporterInterface {
 		return new ImportScanPage( $limit, $cursor, $descriptors );
 	}
 
+	/**
+	 * Exact retained WP Offload Media keys for one attachment.
+	 *
+	 * @return list<ImportedObjectDescriptor>
+	 */
+	public function descriptors_for_attachment( int $attachment_id ): array {
+		if ( $attachment_id <= 0 ) {
+			return array();
+		}
+		$row = $this->item_for_attachment( $attachment_id );
+		if ( $row === null ) {
+			return array();
+		}
+		return $this->descriptors_for_row( $row );
+	}
+
 	/** @return array<string, mixed> */
 	private function read_settings(): array {
 		$settings = get_option( self::OPTION_KEY, array() );
@@ -112,7 +131,7 @@ final class WpOffloadMediaImporter implements ImporterInterface {
 	private function items_after( int $limit, int $after_attachment_id ): array {
 		global $wpdb;
 
-		if ( ! is_object( $wpdb ) ) {
+		if ( ! is_object( $wpdb ) || ! $this->as3cf_items_table_exists() ) {
 			return array();
 		}
 
@@ -128,6 +147,61 @@ final class WpOffloadMediaImporter implements ImporterInterface {
 		$rows  = $wpdb->get_results( $sql, defined( 'ARRAY_A' ) ? ARRAY_A : 'ARRAY_A' );
 
 		return is_array( $rows ) ? $rows : array();
+	}
+
+	/**
+	 * @return array<string, mixed>|null
+	 */
+	private function item_for_attachment( int $attachment_id ): ?array {
+		global $wpdb;
+
+		if ( ! is_object( $wpdb ) || ! $this->as3cf_items_table_exists() ) {
+			return null;
+		}
+
+		$table = $wpdb->prefix . 'as3cf_items';
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- $table contains only $wpdb->prefix plus the literal WP Offload Media suffix; SQL values remain bound below.
+		$sql   = $wpdb->prepare(
+			"SELECT * FROM {$table} WHERE source_type = %s AND source_id = %d ORDER BY id ASC LIMIT 1",
+			self::SOURCE_TYPE,
+			$attachment_id
+		);
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- read-only lookup of WP Offload Media's fixed-prefix table; every value is bound by $wpdb->prepare().
+		$row = $wpdb->get_row( $sql, defined( 'ARRAY_A' ) ? ARRAY_A : 'ARRAY_A' );
+
+		return is_array( $row ) ? $row : null;
+	}
+
+	private function as3cf_items_table_exists(): bool {
+		if ( $this->items_table_exists !== null ) {
+			return $this->items_table_exists;
+		}
+
+		global $wpdb;
+		if ( ! is_object( $wpdb ) || ! method_exists( $wpdb, 'get_var' ) ) {
+			return $this->items_table_exists = false;
+		}
+
+		$table = $wpdb->prefix . 'as3cf_items';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- optional competitor table probe; SHOW TABLES is the cheapest durable existence check.
+		$found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+		return $this->items_table_exists = is_string( $found ) && $found === $table;
+	}
+
+	private function as3cf_files_table_exists(): bool {
+		if ( $this->files_table_exists !== null ) {
+			return $this->files_table_exists;
+		}
+
+		global $wpdb;
+		if ( ! is_object( $wpdb ) || ! method_exists( $wpdb, 'get_var' ) ) {
+			return $this->files_table_exists = false;
+		}
+
+		$table = $wpdb->prefix . 'as3cf_files';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- optional competitor table probe for WP Offload Media 3.4+ sidecars.
+		$found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+		return $this->files_table_exists = is_string( $found ) && $found === $table;
 	}
 
 	/**
@@ -220,7 +294,7 @@ final class WpOffloadMediaImporter implements ImporterInterface {
 	private function files_for_item( int $item_id, int $attachment_id ): array {
 		global $wpdb;
 
-		if ( ! is_object( $wpdb ) ) {
+		if ( ! is_object( $wpdb ) || ! $this->as3cf_files_table_exists() ) {
 			return array();
 		}
 
@@ -401,15 +475,19 @@ final class WpOffloadMediaImporter implements ImporterInterface {
 
 	/** @param array<string, mixed> $row */
 	private function fingerprint( array $row ): string {
-		return implode(
-			':',
-			array(
-				self::SOURCE_ID,
-				$this->string_or_null( $row['provider'] ?? null ) ?? 'unknown-provider',
-				$this->string_or_null( $row['bucket'] ?? null ) ?? 'unknown-bucket',
-				$this->string_or_null( $row['region'] ?? null ) ?? 'unknown-region',
-			)
+		$parts = array(
+			self::SOURCE_ID,
+			$this->string_or_null( $row['provider'] ?? null ) ?? 'unknown-provider',
+			$this->string_or_null( $row['bucket'] ?? null ) ?? 'unknown-bucket',
+			$this->string_or_null( $row['region'] ?? null ) ?? 'unknown-region',
 		);
+		// Only row-level endpoint evidence may enter the fingerprint. Current importer
+		// settings are not historical proof (settings may have moved A→B after the row).
+		$endpoint = $this->string_or_null( $row['endpoint'] ?? $row['storage-endpoint'] ?? null );
+		if ( $endpoint !== null ) {
+			$parts[] = untrailingslashit( $endpoint );
+		}
+		return implode( ':', $parts );
 	}
 
 	private function sibling_path( string $base_path, string $filename ): string {

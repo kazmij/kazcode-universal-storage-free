@@ -11,6 +11,7 @@ namespace Kazcode\WpStorage\Attachment;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Storage\ProfileDeliveryUrlResolver;
 use Kazcode\WpStorage\Storage\PublicUrlResolver;
@@ -46,6 +47,7 @@ final class AttachmentUrlFilter {
 		add_filter('wp_calculate_image_srcset', array($this, 'filter_srcset'), 10, 5);
 		add_filter('wp_prepare_attachment_for_js', array($this, 'filter_prepare_for_js'), 10, 3);
 		add_filter('rest_prepare_attachment', array($this, 'filter_rest_prepare'), 10, 3);
+		add_filter('wp_content_img_tag', array($this, 'filter_content_img_tag'), 10, 3);
 	}
 
 	/**
@@ -95,7 +97,7 @@ final class AttachmentUrlFilter {
 		}
 
 		$resolved = $this->resolve_size_url($attachment_id, $size);
-		if ($resolved === null) {
+		if ($resolved === null || $this->is_full_object_fallback_for_non_image($attachment_id, $resolved)) {
 			return $image;
 		}
 
@@ -132,7 +134,7 @@ final class AttachmentUrlFilter {
 		}
 
 		$resolved = $this->resolve_size_url($attachment_id, $size);
-		if ($resolved === null || $resolved['url'] === '') {
+		if ($resolved === null || $resolved['url'] === '' || $this->is_full_object_fallback_for_non_image($attachment_id, $resolved)) {
 			return $downsize;
 		}
 
@@ -206,9 +208,11 @@ final class AttachmentUrlFilter {
 		}
 
 		if (!empty($response['icon']) && is_string($response['icon']) && $attached !== '') {
-			// Prefer thumbnail for icon when available.
+			// Prefer thumbnail for icon when available. A fallback to the full
+			// object is not a thumbnail: replacing a native icon (e.g. the ZIP
+			// icon) with the remote object URL would break the Media Library.
 			$thumb = $this->resolve_size_url($id, 'thumbnail');
-			if ($thumb !== null) {
+			if ($thumb !== null && $thumb['is_intermediate']) {
 				$response['icon'] = $thumb['url'];
 			}
 		}
@@ -239,17 +243,95 @@ final class AttachmentUrlFilter {
 			$data['source_url'] = $this->serve_url_for_relative( $attached, $id );
 		}
 
-		if (!empty($data['media_details']['sizes']) && is_array($data['media_details']['sizes'])) {
-			foreach ($data['media_details']['sizes'] as $name => $size_data) {
+		// WP_REST_Attachments_Controller supplies media_details as a stdClass on
+		// current WordPress releases. Normalize only this nested payload before
+		// reading its sizes so remote-only attachments cannot make Media REST
+		// fatal after a successful finalization.
+		$media_details = $data['media_details'] ?? null;
+		if (is_object($media_details)) {
+			$media_details = (array) $media_details;
+		}
+		if (is_array($media_details) && !empty($media_details['sizes']) && is_array($media_details['sizes'])) {
+			foreach ($media_details['sizes'] as $name => $size_data) {
 				$resolved = $this->resolve_size_url($id, (string) $name);
 				if ($resolved !== null) {
-					$data['media_details']['sizes'][ $name ]['source_url'] = $resolved['url'];
+					$media_details['sizes'][ $name ]['source_url'] = $resolved['url'];
 				}
 			}
+			$data['media_details'] = $media_details;
 		}
 
 		$response->set_data($data);
 		return $response;
+	}
+
+	/**
+	 * Stored post content keeps the canonical uploads URL; only the rendered
+	 * `src` is pointed at the active delivery URL (#65). Content is never
+	 * mutated, so a CDN/domain change or a restore needs no search/replace.
+	 *
+	 * Rewrites only when the `src` path is provably one of this attachment's own
+	 * files (current sizes, original, or Image Editor backups). A `wp-image-{ID}`
+	 * class whose `src` names another file is left untouched and reported — a
+	 * mismatch is diagnostic evidence, never permission to rewrite.
+	 *
+	 * @param string $filtered_image Full <img> tag.
+	 * @param string $context        Filter context (e.g. the_content).
+	 * @param int    $attachment_id  ID from the wp-image-{ID} class, 0 if none.
+	 */
+	public function filter_content_img_tag($filtered_image, $context, $attachment_id): string {
+		$tag = (string) $filtered_image;
+		$id  = (int) $attachment_id;
+		if ($id <= 0 || !$this->should_serve($id) || !$this->settings->has_public_url_config()) {
+			return $tag;
+		}
+		if (!preg_match('/\ssrc=(["\'])([^"\']+)\1/i', $tag, $match)) {
+			return $tag;
+		}
+
+		$relative = $this->uploads_relative_from_url(html_entity_decode($match[2], ENT_QUOTES));
+		if ($relative === '') {
+			return $tag;
+		}
+
+		$owned = (new AttachmentFileResolver($this->keys))->relative_paths($id);
+		if (!in_array($relative, $owned, true)) {
+			/**
+			 * A content image's class names one attachment while its src names a
+			 * file that attachment does not own. Report-only (Integrity Center).
+			 *
+			 * @param int    $attachment_id Attachment ID from the class.
+			 * @param string $relative      Uploads-relative path from src.
+			 * @param string $context       Filter context.
+			 */
+			do_action('kazus_content_image_identity_mismatch', $id, $relative, (string) $context);
+			return $tag;
+		}
+
+		$url = $this->serve_url_for_relative($relative, $id);
+		if ($url === '') {
+			return $tag;
+		}
+		$escaped = function_exists('esc_url') ? esc_url($url) : htmlspecialchars($url, ENT_QUOTES);
+		return str_replace($match[0], ' src=' . $match[1] . $escaped . $match[1], $tag);
+	}
+
+	/**
+	 * Uploads-relative path for a URL under this site's uploads base, else ''.
+	 */
+	private function uploads_relative_from_url(string $url): string {
+		$uploads = wp_upload_dir();
+		$base    = (string) ($uploads['baseurl'] ?? '');
+		if ($base === '') {
+			return '';
+		}
+		$strip  = static fn(string $u): string => (string) preg_replace('#^https?:#i', '', $u);
+		$base   = rtrim($strip($base), '/') . '/';
+		$target = $strip(strtok($url, '?#') ?: '');
+		if (!str_starts_with($target, $base)) {
+			return '';
+		}
+		return $this->keys->try_normalize_relative(rawurldecode(substr($target, strlen($base))));
 	}
 
 	/**
@@ -262,12 +344,31 @@ final class AttachmentUrlFilter {
 			} catch ( \Throwable $e ) {
 				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 					// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-					error_log( 'KAZCODE Universal Storage presigned URL failed for ' . $relative . ': ' . $e->getMessage() );
+					error_log( 'KAZCODE Universal Storage presigned URL failed for ' . $relative . ': ' . SecretRedactor::redact( $e ) );
 				}
 				return '';
 			}
 		}
 		return $this->profile_urls->url_for_attachment_relative( $attachment_id, $relative );
+	}
+
+	/**
+	 * A ZIP/PDF/audio file has no image of its own: when no real intermediate
+	 * size exists, the "size" is the full object, which must not stand in for
+	 * an image (WordPress then shows its native file-type icon instead).
+	 *
+	 * @param array{url:string,width:int,height:int,is_intermediate:bool} $resolved
+	 */
+	private function is_full_object_fallback_for_non_image(int $attachment_id, array $resolved): bool {
+		return !$resolved['is_intermediate'] && !$this->is_image_attachment($attachment_id);
+	}
+
+	private function is_image_attachment(int $attachment_id): bool {
+		if (function_exists('wp_attachment_is_image')) {
+			return (bool) wp_attachment_is_image($attachment_id);
+		}
+		$attached = (string) get_post_meta($attachment_id, '_wp_attached_file', true);
+		return (bool) preg_match('/\.(jpe?g|png|gif|webp|avif|heic|heif|bmp|tiff?|ico)$/i', $attached);
 	}
 
 	/**

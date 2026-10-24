@@ -17,6 +17,8 @@ use Kazcode\WpStorage\Domain\AttachmentSyncDeriver;
 use Kazcode\WpStorage\Domain\ManifestBuilder;
 use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Domain\StorageProfile;
+use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
+use Kazcode\WpStorage\Infrastructure\AttachmentLock;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
 use Kazcode\WpStorage\Storage\ObjectKeyService;
@@ -33,10 +35,12 @@ final class AdoptAttachmentService {
 		private ?ObjectRepository $objects = null,
 		private ?WpdbStorageProfileRepository $profiles = null,
 		private $gateway_factory = null,
+		private ?AttachmentLock $lock = null,
 	) {
 		$this->manifest_builder = $manifest_builder ?? new ManifestBuilder();
 		$this->objects          = $objects ?? new ObjectRepository();
 		$this->profiles         = $profiles ?? new WpdbStorageProfileRepository();
+		$this->lock             = $lock ?? new AttachmentLock();
 	}
 
 	/**
@@ -188,6 +192,49 @@ final class AdoptAttachmentService {
 	 * @return array{success:bool,message:string,adopted:int,missing:int,errors:int,conflicts:int,dry_run?:bool,status?:string,results:list<array<string,mixed>>}
 	 */
 	private function adopt_verified_descriptors( int $attachment_id, StorageProfile $profile, array $descriptors, bool $dry_run ): array {
+		if ( $dry_run ) {
+			return $this->adopt_verified_descriptors_unlocked( $attachment_id, $profile, $descriptors, true );
+		}
+
+		$lease = $this->lock->acquire_lease( $attachment_id, 'adopt' );
+		if ( ! $lease instanceof AttachmentLeaseHandle ) {
+			return array(
+				'success'   => false,
+				'message'   => 'Attachment is locked by another operation.',
+				'adopted'   => 0,
+				'missing'   => 0,
+				'errors'    => 0,
+				'conflicts' => 1,
+				'results'   => array(
+					array(
+						'relative'       => '',
+						'key'            => '',
+						'exists'         => false,
+						'classification' => 'conflict',
+						'error'          => 'Attachment is locked by another operation.',
+					),
+				),
+			);
+		}
+
+		try {
+			return $this->adopt_verified_descriptors_unlocked( $attachment_id, $profile, $descriptors, false, $lease );
+		} finally {
+			$this->lock->release_lease( $lease );
+		}
+	}
+
+	/**
+	 * @param list<array<string, mixed>> $descriptors Verified descriptor payloads.
+	 * @return array{success:bool,message:string,adopted:int,missing:int,errors:int,conflicts:int,dry_run?:bool,status?:string,results:list<array<string,mixed>>}
+	 */
+	private function adopt_verified_descriptors_unlocked(
+		int $attachment_id,
+		StorageProfile $profile,
+		array $descriptors,
+		bool $dry_run,
+		?AttachmentLeaseHandle $lease = null
+	): array {
 		$gateway       = $this->gateway( $profile );
 		$existing_rows = $this->objects->find_by_attachment( $attachment_id );
 		$results       = array();
@@ -265,7 +312,14 @@ final class AdoptAttachmentService {
 				++$missing;
 				$row_result['classification'] = 'confirmed_missing';
 				if ( ! $dry_run ) {
-					$this->objects->upsert(
+					if ( ! $this->renew_lease_or_fail( $lease ) ) {
+						++$conflicts;
+						$row_result['classification'] = 'conflict';
+						$row_result['error']          = 'Attachment lease lost during adopt.';
+						$results[]                    = $row_result;
+						return $this->adopt_finalize( $attachment_id, $existing_rows, $results, $adopted, $missing, $errors, $conflicts, $skipped, $mutated, false );
+					}
+					$write = $this->objects->insert_owned_or_conflict(
 						array(
 							'attachment_id'       => $attachment_id,
 							'storage_profile_id'  => $profile->id,
@@ -275,7 +329,16 @@ final class AdoptAttachmentService {
 							'remote_status'       => ObjectRemoteStatus::MISSING,
 						)
 					);
+					if ( empty( $write['ok'] ) ) {
+						--$missing;
+						++$conflicts;
+						$row_result['classification'] = 'conflict';
+						$row_result['error']          = 'Owner-preserving inventory write refused.';
+						$results[]                    = $row_result;
+						continue;
+					}
 					$mutated = true;
+					$this->sync_meta_from_inventory( $attachment_id );
 				}
 				$results[] = $row_result;
 				continue;
@@ -294,6 +357,15 @@ final class AdoptAttachmentService {
 			if ( $dry_run ) {
 				$results[] = $row_result;
 				continue;
+			}
+
+			if ( ! $this->renew_lease_or_fail( $lease ) ) {
+				--$adopted;
+				++$conflicts;
+				$row_result['classification'] = 'conflict';
+				$row_result['error']          = 'Attachment lease lost during adopt.';
+				$results[]                    = $row_result;
+				return $this->adopt_finalize( $attachment_id, $existing_rows, $results, $adopted, $missing, $errors, $conflicts, $skipped, $mutated, false );
 			}
 
 			$now  = gmdate( 'Y-m-d H:i:s' );
@@ -315,8 +387,18 @@ final class AdoptAttachmentService {
 			if ( ! empty( $descriptor['etag'] ) ) {
 				$data['etag'] = (string) $descriptor['etag'];
 			}
-			$this->objects->upsert( $data );
+			$write = $this->objects->insert_owned_or_conflict( $data );
+			if ( empty( $write['ok'] ) ) {
+				--$adopted;
+				++$conflicts;
+				$row_result['classification'] = 'conflict';
+				$row_result['error']          = 'Owner-preserving inventory write refused.';
+				$results[]                    = $row_result;
+				continue;
+			}
 			$mutated   = true;
+			// Do not promote serving meta to offloaded after a single PRESENT write —
+			// later descriptors may still fail or the lease may expire mid-scan.
 			$results[] = $row_result;
 		}
 
@@ -340,12 +422,48 @@ final class AdoptAttachmentService {
 			);
 		}
 
+		if ( $mutated && ! $this->renew_lease_or_fail( $lease ) ) {
+			++$conflicts;
+			$results[] = array(
+				'relative'       => '',
+				'key'            => '',
+				'exists'         => false,
+				'classification' => 'conflict',
+				'error'          => 'Attachment lease lost before adopt metadata sync.',
+			);
+			return $this->adopt_finalize( $attachment_id, $existing_rows, $results, $adopted, $missing, $errors, $conflicts, $skipped, true, false );
+		}
+
+		// Positive serving promotion only when every descriptor finished without
+		// transient/conflict/skip gaps — otherwise a lone present row would derive offloaded.
+		$allow_meta_sync = $errors === 0 && $conflicts === 0 && $skipped === 0;
+		return $this->adopt_finalize( $attachment_id, $existing_rows, $results, $adopted, $missing, $errors, $conflicts, $skipped, $mutated, $allow_meta_sync );
+	}
+
+	/**
+	 * @param list<array<string, mixed>> $existing_rows Pre-adopt rows.
+	 * @param list<array<string, mixed>> $results       Per-descriptor results.
+	 * @return array{success:bool,message:string,adopted:int,missing:int,errors:int,conflicts:int,status?:string,results:list<array<string,mixed>>}
+	 */
+	private function adopt_finalize(
+		int $attachment_id,
+		array $existing_rows,
+		array $results,
+		int $adopted,
+		int $missing,
+		int $errors,
+		int $conflicts,
+		int $skipped,
+		bool $mutated,
+		bool $allow_meta_sync
+	): array {
 		$status = AttachmentSyncDeriver::derive_status( $existing_rows );
-		if ( $mutated ) {
+		if ( $mutated && $allow_meta_sync ) {
 			$rows   = $this->objects->find_by_attachment( $attachment_id );
 			$status = AttachmentSyncDeriver::derive_status( $rows );
 			$this->sync_attachment_meta( $attachment_id, $rows, $status );
-
+		}
+		if ( $mutated ) {
 			( new ObjectStatsAggregator( $this->objects ) )->invalidate();
 		}
 
@@ -371,6 +489,22 @@ final class AdoptAttachmentService {
 			'status'    => $status,
 			'results'   => $results,
 		);
+	}
+
+	private function renew_lease_or_fail( ?AttachmentLeaseHandle $lease ): bool {
+		if ( ! $lease instanceof AttachmentLeaseHandle ) {
+			return true;
+		}
+		return $this->lock->renew( $lease );
+	}
+
+	/**
+	 * Refresh attachment cache from current inventory while this worker still holds the lease.
+	 */
+	private function sync_meta_from_inventory( int $attachment_id ): void {
+		$rows   = $this->objects->find_by_attachment( $attachment_id );
+		$status = AttachmentSyncDeriver::derive_status( $rows );
+		$this->sync_attachment_meta( $attachment_id, $rows, $status );
 	}
 
 	/**

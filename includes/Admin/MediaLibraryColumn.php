@@ -11,6 +11,7 @@ namespace Kazcode\WpStorage\Admin;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Plugin;
 use Kazcode\WpStorage\Services\AttachmentObjectSummary;
 use Kazcode\WpStorage\Services\AuditLog;
@@ -146,9 +147,19 @@ final class MediaLibraryColumn {
 		if ( strpos( $doaction, 's3ms_' ) !== 0 || ! current_user_can( 'manage_options' ) ) {
 			return $redirect;
 		}
-		$act = substr( $doaction, 5 );
-		$n   = $this->run_many( $act, array_map( 'intval', $post_ids ) );
-		return add_query_arg( 's3ms_bulk', $n, $redirect );
+		$act    = substr( $doaction, 5 );
+		$summary = $this->run_many( $act, array_map( 'intval', $post_ids ) );
+		$redirect = add_query_arg( 's3ms_bulk', (int) $summary['ok'], $redirect );
+		if ( (int) $summary['fail'] > 0 ) {
+			$redirect = add_query_arg(
+				array(
+					's3ms_bulk_fail' => (int) $summary['fail'],
+					's3ms_bulk_msg'  => rawurlencode( SecretRedactor::redact( (string) ( $summary['message'] ?? '' ), 200 ) ),
+				),
+				$redirect
+			);
+		}
+		return $redirect;
 	}
 
 	/**
@@ -156,21 +167,43 @@ final class MediaLibraryColumn {
 	 */
 	public function bulk_notice(): void {
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: this is a query-arg round-trip WordPress core's own bulk-actions redirect adds (add_query_arg() in handle_bulk() above), not a form submission; it only controls whether an informational notice is shown, never a state change.
-		if ( ! isset( $_GET['s3ms_bulk'] ) ) {
+		if ( ! isset( $_GET['s3ms_bulk'] ) && ! isset( $_GET['s3ms_bulk_fail'] ) ) {
 			return;
 		}
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only, see rationale above; cast to int and only ever used as a display count in the notice text below.
-		$n = (int) $_GET['s3ms_bulk'];
-		printf(
-			'<div class="notice notice-success is-dismissible"><p>%s</p></div>',
-			esc_html(
-				sprintf(
-					/* translators: %d: count */
-					__( 'KAZCODE Universal Storage processed %d attachment(s).', 'kazcode-universal-storage' ),
-					$n
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only, see rationale above.
+		$fail = isset( $_GET['s3ms_bulk_fail'] ) ? (int) $_GET['s3ms_bulk_fail'] : 0;
+		if ( $fail > 0 ) {
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- display-only; sanitized via sanitize_text_field.
+			$msg = isset( $_GET['s3ms_bulk_msg'] ) ? sanitize_text_field( wp_unslash( (string) $_GET['s3ms_bulk_msg'] ) ) : '';
+			if ( $msg === '' ) {
+				$msg = __( 'Restore blocked or requires acknowledge (use CLI/REST with acknowledge_warning).', 'kazcode-universal-storage' );
+			}
+			printf(
+				'<div class="notice notice-error is-dismissible"><p>%s</p></div>',
+				esc_html(
+					sprintf(
+						/* translators: 1: failure count 2: reason */
+						__( 'KAZCODE Universal Storage: %1$d restore(s) did not complete. %2$s', 'kazcode-universal-storage' ),
+						$fail,
+						$msg
+					)
 				)
-			)
-		);
+			);
+		}
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only, see rationale above; cast to int and only ever used as a display count in the notice text below.
+		$n = isset( $_GET['s3ms_bulk'] ) ? (int) $_GET['s3ms_bulk'] : 0;
+		if ( $n > 0 ) {
+			printf(
+				'<div class="notice notice-success is-dismissible"><p>%s</p></div>',
+				esc_html(
+					sprintf(
+						/* translators: %d: count */
+						__( 'KAZCODE Universal Storage processed %d attachment(s).', 'kazcode-universal-storage' ),
+						$n
+					)
+				)
+			);
+		}
 	}
 
 	/**
@@ -183,20 +216,36 @@ final class MediaLibraryColumn {
 		$id  = isset( $_GET['attachment_id'] ) ? (int) $_GET['attachment_id'] : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 		$act = isset( $_GET['s3ms_do'] ) ? sanitize_key( (string) $_GET['s3ms_do'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 		check_admin_referer( 'kazus_att_' . $id );
-		$this->run_many( $act, array( $id ) );
-		wp_safe_redirect( admin_url( 'upload.php' ) );
+		$summary  = $this->run_many( $act, array( $id ) );
+		$redirect = admin_url( 'upload.php' );
+		if ( (int) $summary['fail'] > 0 ) {
+			$redirect = add_query_arg(
+				array(
+					's3ms_bulk'      => 0,
+					's3ms_bulk_fail' => (int) $summary['fail'],
+					's3ms_bulk_msg'  => rawurlencode( SecretRedactor::redact( (string) ( $summary['message'] ?? '' ), 200 ) ),
+				),
+				$redirect
+			);
+		} elseif ( (int) $summary['ok'] > 0 ) {
+			$redirect = add_query_arg( 's3ms_bulk', (int) $summary['ok'], $redirect );
+		}
+		wp_safe_redirect( $redirect );
 		exit;
 	}
 
 	/**
-	 * @param string   $act Action.
+	 * @param string    $act Action.
 	 * @param list<int> $ids IDs.
+	 * @return array{ok:int,fail:int,message:string}
 	 */
-	private function run_many( string $act, array $ids ): int {
-		$plugin = Plugin::instance();
-		$failed = new FailedItemsService();
-		$audit  = new AuditLog();
-		$n      = 0;
+	private function run_many( string $act, array $ids ): array {
+		$plugin  = Plugin::instance();
+		$failed  = new FailedItemsService();
+		$audit   = new AuditLog();
+		$ok      = 0;
+		$fail    = 0;
+		$message = '';
 		foreach ( $ids as $id ) {
 			$id = (int) $id;
 			if ( $id <= 0 ) {
@@ -204,21 +253,35 @@ final class MediaLibraryColumn {
 			}
 			if ( $act === 'offload' ) {
 				$plugin->offloader()->offload( $id );
+				++$ok;
 			} elseif ( $act === 'verify' ) {
 				$plugin->verification_service()->verify( $id );
+				++$ok;
 			} elseif ( $act === 'restore' ) {
-				$plugin->restorer()->restore( $id );
+				// Media Library has no acknowledge UX in #6 — WARNING/BLOCKED stay fail-closed.
+				$result = $plugin->restorer()->restore( $id );
+				if ( ! empty( $result['success'] ) ) {
+					++$ok;
+				} else {
+					++$fail;
+					if ( $message === '' ) {
+						$message = (string) ( $result['message'] ?? 'restore failed' );
+					}
+				}
 			} elseif ( $act === 'ignore' ) {
 				$failed->set_ignored( array( $id ), true );
+				++$ok;
 			} elseif ( $act === 'unignore' ) {
 				$failed->set_ignored( array( $id ), false );
-			} else {
-				continue;
+				++$ok;
 			}
-			++$n;
 		}
-		$audit->record( 'media_library_' . $act, array( 'count' => $n, 'ids' => array_slice( $ids, 0, 20 ) ) );
-		return $n;
+		$audit->record( 'media_library_' . $act, array( 'count' => $ok, 'failed' => $fail, 'ids' => array_slice( $ids, 0, 20 ) ) );
+		return array(
+			'ok'      => $ok,
+			'fail'    => $fail,
+			'message' => $message,
+		);
 	}
 
 	private function action_label( string $act ): string {

@@ -317,15 +317,367 @@ final class CompetitorImportServiceTest extends TestCase {
 
 		foreach ( WpStubs::$options[ AuditLog::OPTION_KEY ] ?? array() as $event ) {
 			$this->assertSame(
-				array( 'source_type', 'profile_id', 'uuid', 'processed', 'verified', 'missing', 'transient_errors', 'conflicts' ),
+				array( 'source_type', 'profile_id', 'uuid', 'processed', 'verified', 'missing', 'transient_errors', 'conflicts', 'skipped', 'rejected' ),
 				array_keys( $event['context'] )
 			);
 		}
 	}
 
+	public function test_named_provider_fingerprint_without_endpoint_does_not_match_generic_aws_profile(): void {
+		$wasabi = new ImportedObjectDescriptor(
+			501,
+			'2026/09/wasabi.jpg',
+			'original',
+			'wasabi/wasabi.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:wasabi:media-bucket'
+		);
+		$aws = new ImportedObjectDescriptor(
+			502,
+			'2026/09/aws.jpg',
+			'original',
+			'aws/aws.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:s3:media-bucket:eu-central-1'
+		);
+		$adopter = new CompetitorImportFakeAdopter(
+			array(
+				501 => array( 'adopted' => 1, 'missing' => 0, 'errors' => 0, 'conflicts' => 0 ),
+				502 => array( 'adopted' => 1, 'missing' => 0, 'errors' => 0, 'conflicts' => 0 ),
+			)
+		);
+		$service = $this->service(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 2, 502, array( $wasabi, $aws ) ),
+					new ImportScanPage( 2, 502, array() ),
+				)
+			),
+			$adopter
+		);
+
+		$run    = $service->start_dry_run( 'media_cloud', 12 );
+		$result = $service->process_next_page( $run['uuid'], 50 );
+
+		$this->assertSame( 2, $result['processed'] );
+		$this->assertSame( 1, $result['verified'] );
+		$this->assertSame( 1, $result['skipped'] );
+		$this->assertSame( 0, $result['conflicts'] );
+		$this->assertCount( 1, $adopter->calls );
+		$this->assertSame( 502, $adopter->calls[0]['attachment_id'] );
+	}
+
+	public function test_adoption_conflicts_do_not_fail_dry_run_as_profile_mismatch(): void {
+		$matched = new ImportedObjectDescriptor(
+			701,
+			'2026/09/conflict.jpg',
+			'original',
+			'aws/conflict.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:s3:media-bucket:eu-central-1'
+		);
+		$adopter = new CompetitorImportFakeAdopter(
+			array(
+				701 => array( 'adopted' => 0, 'missing' => 0, 'errors' => 0, 'conflicts' => 1 ),
+			)
+		);
+		$service = $this->service(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 1, 701, array( $matched ) ),
+					new ImportScanPage( 1, 701, array() ),
+				)
+			),
+			$adopter
+		);
+
+		$run = $service->start_dry_run( 'media_cloud', 12 );
+		$service->process_next_page( $run['uuid'], 50 );
+		$result = $service->process_next_page( $run['uuid'], 50 );
+
+		$this->assertSame( ImportRunStatus::COMPLETED, $result['status'] );
+		$this->assertSame( 1, $result['processed'] );
+		$this->assertSame( 1, $result['conflicts'] );
+		$this->assertSame( 0, $result['skipped'] );
+		$this->assertCount( 1, $adopter->calls );
+	}
+
+	public function test_endpointless_other_s3_fingerprint_fails_closed_against_custom_profile(): void {
+		$other = new ImportedObjectDescriptor(
+			601,
+			'2026/09/other.jpg',
+			'original',
+			'other/other.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:other-s3:media-bucket:eu-central-1'
+		);
+		$adopter = new CompetitorImportFakeAdopter(
+			array(
+				601 => array( 'adopted' => 1, 'missing' => 0, 'errors' => 0, 'conflicts' => 0 ),
+			)
+		);
+		$service = $this->service_with_profile(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 1, 601, array( $other ) ),
+					new ImportScanPage( 1, 601, array() ),
+				)
+			),
+			$adopter,
+			'custom',
+			'https://minio.example:9000'
+		);
+
+		$run = $service->start_dry_run( 'media_cloud', 12 );
+		$service->process_next_page( $run['uuid'], 50 );
+		$result = $service->process_next_page( $run['uuid'], 50 );
+
+		$this->assertSame( 1, $result['processed'] );
+		$this->assertSame( 0, $result['verified'] );
+		$this->assertSame( 1, $result['skipped'] );
+		$this->assertSame( 0, $result['conflicts'] );
+		$this->assertSame( ImportRunStatus::FAILED, $result['status'] );
+		$this->assertCount( 0, $adopter->calls );
+	}
+
+	public function test_endpointless_s3_fingerprint_does_not_match_minio_or_custom_profile(): void {
+		$s3 = new ImportedObjectDescriptor(
+			602,
+			'2026/09/s3.jpg',
+			'original',
+			's3/s3.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:s3:media-bucket:eu-central-1'
+		);
+		$adopter = new CompetitorImportFakeAdopter(
+			array(
+				602 => array( 'adopted' => 1, 'missing' => 0, 'errors' => 0, 'conflicts' => 0 ),
+			)
+		);
+
+		foreach ( array( 'minio', 'custom' ) as $provider_type ) {
+			$service = $this->service_with_profile(
+				new CompetitorImportFakeImporter(
+					'media_cloud',
+					array(
+						new ImportScanPage( 1, 602, array( $s3 ) ),
+						new ImportScanPage( 1, 602, array() ),
+					)
+				),
+				$adopter,
+				$provider_type,
+				'https://s3-compatible.example'
+			);
+			$adopter->calls = array();
+
+			$run = $service->start_dry_run( 'media_cloud', 12 );
+			$service->process_next_page( $run['uuid'], 50 );
+			$result = $service->process_next_page( $run['uuid'], 50 );
+
+			$this->assertSame( 1, $result['processed'], $provider_type );
+			$this->assertSame( 1, $result['skipped'], $provider_type );
+			$this->assertSame( 0, $result['conflicts'], $provider_type );
+			$this->assertSame( ImportRunStatus::FAILED, $result['status'], $provider_type );
+			$this->assertCount( 0, $adopter->calls, $provider_type );
+		}
+	}
+
+	public function test_other_s3_fingerprint_with_matching_endpoint_binds_to_custom_profile(): void {
+		$other = new ImportedObjectDescriptor(
+			603,
+			'2026/09/other-ep.jpg',
+			'original',
+			'other/other-ep.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:other-s3:media-bucket:eu-central-1:https://minio.example:9000'
+		);
+		$adopter = new CompetitorImportFakeAdopter(
+			array(
+				603 => array( 'adopted' => 1, 'missing' => 0, 'errors' => 0, 'conflicts' => 0 ),
+			)
+		);
+		$service = $this->service_with_profile(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 1, 603, array( $other ) ),
+					new ImportScanPage( 1, 603, array() ),
+				)
+			),
+			$adopter,
+			'custom',
+			'https://minio.example:9000'
+		);
+
+		$run    = $service->start_dry_run( 'media_cloud', 12 );
+		$result = $service->process_next_page( $run['uuid'], 50 );
+
+		$this->assertSame( 1, $result['processed'] );
+		$this->assertSame( 1, $result['verified'] );
+		$this->assertCount( 1, $adopter->calls );
+		$this->assertSame( 603, $adopter->calls[0]['attachment_id'] );
+	}
+
+	public function test_profile_mismatch_terminal_failure_returns_reasoned_error_response(): void {
+		$mismatched = new ImportedObjectDescriptor(
+			901,
+			'2026/09/wasabi-only.jpg',
+			'original',
+			'wasabi/wasabi-only.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:wasabi:media-bucket'
+		);
+		$service = $this->service(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 1, 901, array( $mismatched ) ),
+					new ImportScanPage( 1, 901, array() ),
+				)
+			)
+		);
+
+		$run = $service->start_dry_run( 'media_cloud', 12 );
+		$service->process_next_page( $run['uuid'], 1 );
+		$result = $service->process_next_page( $run['uuid'], 1 );
+		$status = $service->status( $run['uuid'] );
+		$retry  = $service->process_next_page( $run['uuid'], 1 );
+
+		foreach ( array( $result, $status, $retry ) as $response ) {
+			$this->assertFalse( $response['success'] );
+			$this->assertSame( 'import_run_failed', $response['code'] );
+			$this->assertSame( 'No descriptors matched the selected storage profile.', $response['message'] );
+			$this->assertSame( ImportRunStatus::FAILED, $response['status'] );
+			$this->assertSame( 1, $response['processed'] );
+			$this->assertSame( 1, $response['skipped'] );
+			$this->assertSame( 0, $response['conflicts'] );
+		}
+	}
+
+	public function test_keyless_scan_rejections_are_counted_without_profile_mismatch_or_adoption(): void {
+		$adopter = new CompetitorImportFakeAdopter();
+		$service = $this->service(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 2, 902, array(), 2 ),
+					new ImportScanPage( 2, 902, array() ),
+				)
+			),
+			$adopter
+		);
+
+		$run    = $service->start_dry_run( 'media_cloud', 12 );
+		$first  = $service->process_next_page( $run['uuid'], 2 );
+		$service->pause( $run['uuid'] );
+		$service->resume( $run['uuid'] );
+		$result = $service->process_next_page( $run['uuid'], 2 );
+		$status = $service->status( $run['uuid'] );
+		$retry  = $service->process_next_page( $run['uuid'], 2 );
+
+		$this->assertSame( ImportRunStatus::RUNNING, $first['status'] );
+		foreach ( array( $result, $status, $retry ) as $response ) {
+			$this->assertFalse( $response['success'] );
+			$this->assertSame( 'import_run_failed', $response['code'] );
+			$this->assertSame( 'No importable descriptors were found in source metadata.', $response['message'] );
+			$this->assertSame( ImportRunStatus::FAILED, $response['status'] );
+			$this->assertSame( 2, $response['processed'] );
+			$this->assertSame( 2, $response['skipped'] );
+			$this->assertSame( 0, $response['conflicts'] );
+		}
+		$this->assertCount( 0, $adopter->calls );
+	}
+
+	public function test_mixed_scan_rejection_and_profile_mismatch_reports_profile_reason(): void {
+		$mismatched = new ImportedObjectDescriptor(
+			904,
+			'2026/09/wasabi-only.jpg',
+			'original',
+			'wasabi/wasabi-only.jpg',
+			100,
+			'image/jpeg',
+			'media-cloud:wasabi:media-bucket'
+		);
+		$service = $this->service(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 2, 904, array( $mismatched ), 1 ),
+					new ImportScanPage( 2, 904, array() ),
+				)
+			)
+		);
+
+		$run = $service->start_dry_run( 'media_cloud', 12 );
+		$service->process_next_page( $run['uuid'], 2 );
+		$result = $service->process_next_page( $run['uuid'], 2 );
+
+		$this->assertFalse( $result['success'] );
+		$this->assertSame( 'import_run_failed', $result['code'] );
+		$this->assertSame( 'No descriptors matched the selected storage profile.', $result['message'] );
+		$this->assertSame( 2, $result['processed'] );
+		$this->assertSame( 2, $result['skipped'] );
+		$this->assertSame( 1, $result['rejected'] );
+	}
+
+	public function test_mixed_scan_rejections_and_descriptors_are_counted_separately_from_conflicts(): void {
+		$adopter = new CompetitorImportFakeAdopter(
+			array(
+				903 => array( 'adopted' => 1, 'missing' => 0, 'errors' => 0, 'conflicts' => 0 ),
+			)
+		);
+		$service = $this->service(
+			new CompetitorImportFakeImporter(
+				'media_cloud',
+				array(
+					new ImportScanPage( 2, 903, array( $this->descriptor( 903, '2026/09/valid.jpg', 'valid.jpg' ) ), 1 ),
+					new ImportScanPage( 2, 903, array() ),
+				)
+			),
+			$adopter
+		);
+
+		$run    = $service->start_dry_run( 'media_cloud', 12 );
+		$first  = $service->process_next_page( $run['uuid'], 2 );
+		$result = $service->process_next_page( $run['uuid'], 2 );
+
+		$this->assertSame( 2, $first['processed'] );
+		$this->assertSame( 1, $first['verified'] );
+		$this->assertSame( 1, $first['skipped'] );
+		$this->assertSame( 0, $first['conflicts'] );
+		$this->assertSame( ImportRunStatus::COMPLETED, $result['status'] );
+		$this->assertSame( 2, $result['processed'] );
+		$this->assertSame( 1, $result['verified'] );
+		$this->assertSame( 1, $result['skipped'] );
+		$this->assertSame( 0, $result['conflicts'] );
+		$this->assertCount( 1, $adopter->calls );
+	}
+
 	private function service(
 		CompetitorImportFakeImporter $importer,
 		?CompetitorImportFakeAdopter $adopter = null,
+		?AuditLog $audit = null,
+		?CompetitorImportFakeRunRepository $runs = null,
+		?ImportRegistry $registry = null
+	): CompetitorImportService {
+		return $this->service_with_profile( $importer, $adopter, 'aws', 'https://s3.example.test', $audit, $runs, $registry );
+	}
+
+	private function service_with_profile(
+		CompetitorImportFakeImporter $importer,
+		?CompetitorImportFakeAdopter $adopter,
+		string $provider_type,
+		string $endpoint,
 		?AuditLog $audit = null,
 		?CompetitorImportFakeRunRepository $runs = null,
 		?ImportRegistry $registry = null
@@ -336,10 +688,10 @@ final class CompetitorImportServiceTest extends TestCase {
 				$id,
 				'profile-' . $id,
 				'Profile ' . $id,
-				'aws',
+				$provider_type,
 				'media-bucket',
 				'eu-central-1',
-				'https://s3.example.test',
+				$endpoint,
 				false,
 				'uploads/',
 				'storage',
@@ -418,6 +770,10 @@ final class CompetitorImportFakeImporter implements ImporterInterface {
 		}
 		return new ImportScanPage( $limit, $after_attachment_id, array() );
 	}
+
+	public function descriptors_for_attachment( int $attachment_id ): array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		return array();
+	}
 }
 
 final class CompetitorImportFakeRunRepository extends ImportRunRepository {
@@ -434,6 +790,8 @@ final class CompetitorImportFakeRunRepository extends ImportRunRepository {
 		$data['missing']   = (int) ( $data['missing'] ?? 0 );
 		$data['transient_errors'] = (int) ( $data['transient_errors'] ?? 0 );
 		$data['conflicts']        = (int) ( $data['conflicts'] ?? 0 );
+		$data['skipped']          = (int) ( $data['skipped'] ?? 0 );
+		$data['rejected']         = (int) ( $data['rejected'] ?? 0 );
 		$data['after_attachment_id'] = (int) ( $data['after_attachment_id'] ?? 0 );
 		$this->rows[ $id ]       = $data;
 		return $id;

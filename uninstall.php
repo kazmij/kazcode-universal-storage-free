@@ -57,6 +57,8 @@ function kazus_uninstall_clear_ephemeral_state(): void {
 	delete_option( 's3ms_background_job' );       // BackgroundMigrator resumable-batch cursor.
 	delete_option( 'kazus_background_tick_lease' ); // BackgroundMigrator tick concurrency lease.
 	delete_option( 's3ms_transfer_session_lease' ); // Stale transfer cleanup lease/state.
+	delete_option( 's3ms_safe_mode_block' );      // Safe Mode last block (#61), rebuilt on the next write.
+	delete_option( 's3ms_namespace_takeover' );   // Pending, not yet used, namespace takeover acknowledgements.
 
 	// Per-attachment processing locks (AttachmentLock) — dynamically named
 	// options, one per attachment ever locked (s3ms_lock_123, s3ms_lock_456,
@@ -64,6 +66,9 @@ function kazus_uninstall_clear_ephemeral_state(): void {
 	// LIKE pattern only — never built from request/user input.
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin-owned dynamically-named option cleanup; no WordPress API deletes options by pattern, and this is a one-time uninstall operation, not a request-path query.
 	$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 's3ms\\_lock\\_%'" );
+	// Per-user Integrity Verify/Repair dry-run state (IntegrityActions), same pattern.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- see above.
+	$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'kazus\\_integrity\\_%'" );
 
 	// Onboarding tour dismissal — a per-user UI preference, not recovery data.
 	delete_metadata( 'user', 0, 's3ms_tour_dismissed', '', true );
@@ -72,6 +77,7 @@ function kazus_uninstall_clear_ephemeral_state(): void {
 	// no-op (not an error) if nothing is currently scheduled.
 	wp_clear_scheduled_hook( 'kazus_background_tick' );
 	wp_clear_scheduled_hook( 'kazus_stale_transfer_cleanup' );
+	wp_clear_scheduled_hook( 'kazus_reservation_cleanup' );
 	if ( function_exists( 'as_unschedule_all_actions' ) ) {
 		// Removes only this plugin's own scheduled actions for this one hook —
 		// never touches Action Scheduler's shared tables/other plugins' actions.
@@ -94,14 +100,22 @@ function kazus_uninstall_purge_durable_state(): void {
 	delete_option( 's3ms_encrypted_secret' );
 
 	delete_option( 's3ms_settings' );
+	// Site identity (#61). The ownership marker object in the bucket is left in
+	// place like every other remote object; a reinstall gets a new identity and
+	// must take over the prefix explicitly.
+	delete_option( 's3ms_site_identity' );
 	// s3ms_network_settings is written via update_site_option() (wp_sitemeta on
 	// multisite), never a regular per-site option — delete_site_option() is the
 	// correct call in both multisite and single-site (where it transparently
 	// falls back to the regular options table).
 	delete_site_option( 's3ms_network_settings' );
 	delete_option( 's3ms_schema_version' );
+	// Direct Upload is Pro-owned, but this explicit-purge fallback also covers
+	// the ordering where Pro was removed before Core is uninstalled.
+	delete_option( 's3ms_pro_direct_upload_schema_version' );
 	delete_option( 's3ms_legacy_profile_uuid' );
 	delete_option( 's3ms_audit_log' );
+	delete_option( 's3ms_direct_upload_expiry_cursor' );
 
 	// Plugin-owned custom tables. Explicit, hardcoded names only — never
 	// constructed from input, and never any table this plugin does not
@@ -112,6 +126,12 @@ function kazus_uninstall_purge_durable_state(): void {
 	$s3ms_profiles_table = $wpdb->prefix . 's3ms_storage_profiles';
 	$s3ms_transfers_table = $wpdb->prefix . 's3ms_transfer_sessions';
 	$s3ms_import_runs_table = $wpdb->prefix . 's3ms_import_runs';
+	$s3ms_reservation_cleanup_table = $wpdb->prefix . 's3ms_reservation_cleanup';
+	$s3ms_finalization_intents_table = $wpdb->prefix . 's3ms_du_finalization_intents';
+	$s3ms_migration_fences_table = $wpdb->prefix . 's3ms_direct_upload_migration_fences';
+	$s3ms_direct_upload_sessions_table = $wpdb->prefix . 's3ms_direct_upload_sessions';
+	$s3ms_direct_upload_attempts_table = $wpdb->prefix . 's3ms_direct_upload_attempts';
+	$s3ms_direct_upload_rate_limits_table = $wpdb->prefix . 's3ms_direct_upload_rate_limits';
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded plugin-owned table name (not user input); DROP TABLE cannot be parameterized via $wpdb->prepare() placeholders, and a one-time uninstall schema change is exactly what this table's removal requires.
 	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_objects_table}" );
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded plugin-owned table name (not user input); DROP TABLE cannot be parameterized via $wpdb->prepare() placeholders, and a one-time uninstall schema change is exactly what this table's removal requires.
@@ -120,6 +140,18 @@ function kazus_uninstall_purge_durable_state(): void {
 	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_transfers_table}" );
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded plugin-owned table name (not user input); DROP TABLE cannot be parameterized via $wpdb->prepare() placeholders, and a one-time uninstall schema change is exactly what this table's removal requires.
 	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_import_runs_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded Core-owned Direct Upload table name; see the identical DROP statements above.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_reservation_cleanup_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded Core-owned Direct Upload table name; see the identical DROP statements above.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_finalization_intents_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded Core-owned Direct Upload table name; see the identical DROP statements above.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_migration_fences_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded Pro-owned Direct Upload table as an opt-in purge fallback after Pro removal; see the identical DROP statements above.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_direct_upload_sessions_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded Pro-owned Direct Upload table as an opt-in purge fallback after Pro removal; see the identical DROP statements above.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_direct_upload_attempts_table}" );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- explicit hardcoded Pro-owned Direct Upload table as an opt-in purge fallback after Pro removal; see the identical DROP statements above.
+	$wpdb->query( "DROP TABLE IF EXISTS {$s3ms_direct_upload_rate_limits_table}" );
 
 	// Legacy/compat per-attachment postmeta. This never deletes the
 	// attachment post itself, never touches the local file, and never
@@ -132,6 +164,8 @@ function kazus_uninstall_purge_durable_state(): void {
 		'_s3ms_last_error',
 		'_s3ms_verified_at',
 		'_s3ms_ignored',
+		'_s3ms_direct_upload_location',
+		'_s3ms_direct_upload_reservation_binding',
 	);
 	foreach ( $s3ms_meta_keys as $s3ms_meta_key ) {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- one-time uninstall cleanup of this plugin's own postmeta keys, not a request-path query; $wpdb->delete() parameterizes the meta_key value.

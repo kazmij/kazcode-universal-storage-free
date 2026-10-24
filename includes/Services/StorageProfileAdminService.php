@@ -11,6 +11,7 @@ namespace Kazcode\WpStorage\Services;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\ProServices;
 use Kazcode\WpStorage\Core\ProviderPresets;
 use Kazcode\WpStorage\Core\Settings;
@@ -113,7 +114,7 @@ final class StorageProfileAdminService {
 		} catch ( \Throwable $e ) {
 			return array(
 				'success' => false,
-				'message' => $e->getMessage(),
+				'message' => SecretRedactor::redact( $e ),
 			);
 		}
 	}
@@ -145,7 +146,8 @@ final class StorageProfileAdminService {
 			// that a deliberate choice must be preserved (see
 			// LegacyProfileMigrator::sync_default_profile_from_settings()'s
 			// matching exception and its docblock for the bug this prevents).
-			$location_editable = ! $existing->location_locked && ( $object_count === 0 || $existing->bucket === '' );
+			$active_direct_upload = (bool) apply_filters( 'kazus_profile_has_active_direct_upload_reference', false, $id );
+			$location_editable = ! $active_direct_upload && ! $existing->location_locked && ( $object_count === 0 || $existing->bucket === '' );
 			$fields            = $this->sanitize_input( $input, $existing, $location_editable );
 			$credentials_ref   = $this->resolve_credentials( $existing );
 
@@ -168,7 +170,7 @@ final class StorageProfileAdminService {
 		} catch ( \Throwable $e ) {
 			return array(
 				'success' => false,
-				'message' => $e->getMessage(),
+				'message' => SecretRedactor::redact( $e ),
 			);
 		}
 	}
@@ -190,7 +192,7 @@ final class StorageProfileAdminService {
 		} catch ( \Throwable $e ) {
 			return array(
 				'success' => false,
-				'message' => $e->getMessage(),
+				'message' => SecretRedactor::redact( $e ),
 			);
 		}
 	}
@@ -226,7 +228,7 @@ final class StorageProfileAdminService {
 		} catch ( \Throwable $e ) {
 			return array(
 				'success' => false,
-				'message' => $e->getMessage(),
+				'message' => SecretRedactor::redact( $e ),
 			);
 		}
 	}

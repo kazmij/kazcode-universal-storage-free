@@ -13,6 +13,7 @@ defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Attachment\AttachmentFileResolver;
 use Kazcode\WpStorage\Domain\ObjectHealthState;
+use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Storage\PathGuard;
 
@@ -71,6 +72,50 @@ final class HealthScanService {
 			'repairable'     => $repairable,
 			'samples'        => $samples,
 		);
+	}
+
+	/**
+	 * Repair dry-run: list repairable rows (local file present, current variant). Never writes.
+	 *
+	 * @return array{scanned:int,next_after_id:int,has_more:bool,items:list<array<string,mixed>>}
+	 */
+	public function repairable_page( int $limit = 100, int $after_id = 0 ): array {
+		$rows  = $this->objects->scan_page( $limit, $after_id );
+		$items = array();
+		$last  = $after_id;
+		foreach ( $rows as $row ) {
+			$last     = max( $last, (int) ( $row['id'] ?? 0 ) );
+			$relative = (string) ( $row['local_relative_path'] ?? '' );
+			$local    = $this->local_exists( $relative );
+			$health   = ObjectHealthState::classify_row( $row, $local );
+			if ( ! ObjectHealthState::is_repairable( $health, $local ) || ! $this->is_repair_target( $row ) ) {
+				continue;
+			}
+			$items[] = array(
+				'object_id'          => (int) ( $row['id'] ?? 0 ),
+				'attachment_id'      => (int) ( $row['attachment_id'] ?? 0 ),
+				'storage_profile_id' => (int) ( $row['storage_profile_id'] ?? 0 ),
+				'relative'           => $relative,
+				'remote_status'      => (string) ( $row['remote_status'] ?? '' ),
+				'health'             => $health,
+			);
+		}
+
+		return array(
+			'scanned'       => count( $rows ),
+			'next_after_id' => $rows === array() ? $after_id : $last,
+			'has_more'      => count( $rows ) >= $limit,
+			'items'         => $items,
+		);
+	}
+
+	/**
+	 * In-flight uploads are owned by their worker; only settled failures are re-uploaded.
+	 *
+	 * @param array<string, mixed> $row
+	 */
+	private function is_repair_target( array $row ): bool {
+		return in_array( (string) ( $row['remote_status'] ?? '' ), array( ObjectRemoteStatus::MISSING, ObjectRemoteStatus::FAILED, ObjectRemoteStatus::PRESENT ), true );
 	}
 
 	/**

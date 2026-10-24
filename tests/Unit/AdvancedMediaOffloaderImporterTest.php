@@ -261,6 +261,44 @@ final class AdvancedMediaOffloaderImporterTest extends TestCase {
 	}
 
 	/** @param array<string, mixed> $metadata */
+
+	public function test_fingerprint_does_not_infer_endpoint_from_current_detect(): void {
+		WpStubs::$options['advmo_settings'] = array(
+			'cloud_provider' => 'minio',
+		);
+		WpStubs::$options['advmo_credentials'] = array(
+			'minio' => array(
+				'bucket'   => 'media-bucket',
+				'region'   => 'us-east-1',
+				'endpoint' => 'http://minio-b.example:9000',
+			),
+		);
+		$this->seed_attachment( 601, 'image/jpeg', '2026/09/hist.jpg', array( 'file' => '2026/09/hist.jpg', 'filesize' => 40 ) );
+		$this->seed_advmo_meta( 601, 'minio', 'media-bucket', 'hist/' );
+		// No advmo_endpoint meta — fingerprint must stay endpoint-unknown.
+
+		$page = ( new AdvancedMediaOffloaderImporter() )->scan_page( 1, 600 );
+		$this->assertCount( 1, $page->descriptors() );
+		$this->assertSame(
+			'advanced-media-offloader:minio:media-bucket',
+			$page->descriptors()[0]->source_fingerprint()
+		);
+		$this->assertStringNotContainsString( 'minio-b.example', $page->descriptors()[0]->source_fingerprint() );
+	}
+
+	public function test_fingerprint_embeds_attachment_endpoint_meta_when_present(): void {
+		$this->seed_attachment( 602, 'image/jpeg', '2026/09/with-ep.jpg', array( 'file' => '2026/09/with-ep.jpg', 'filesize' => 40 ) );
+		$this->seed_advmo_meta( 602, 'minio', 'media-bucket', 'hist/' );
+		WpStubs::set_meta( 602, 'advmo_region', 'us-east-1' );
+		WpStubs::set_meta( 602, 'advmo_endpoint', 'http://minio-a.example:9000' );
+
+		$page = ( new AdvancedMediaOffloaderImporter() )->scan_page( 1, 601 );
+		$this->assertSame(
+			'advanced-media-offloader:minio:media-bucket:us-east-1:http://minio-a.example:9000',
+			$page->descriptors()[0]->source_fingerprint()
+		);
+	}
+
 	private function seed_attachment( int $id, string $mime, string $attached_file, array $metadata ): void {
 		WpStubs::$posts[ $id ] = (object) array(
 			'ID'             => $id,

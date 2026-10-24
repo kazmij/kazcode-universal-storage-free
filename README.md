@@ -60,7 +60,7 @@ Pro/pricing: <https://kazcode.net/universal-storage/#pricing>.
 | Health checks, repair, WP-CLI, REST API | ✓ | ✓ |
 | Background/resumable migration (WP-Cron) | ✓ | ✓ |
 | Crash-resumable multipart upload and recovery | ✓ | ✓ |
-| Import from WP Offload Media or Advanced Media Offloader | ✓ | ✓ |
+| Import from WP Offload Media, Advanced Media Offloader, or Media Cloud | ✓ | ✓ |
 | Private media (signed, time-limited URLs) | ✓ | ✓ |
 | Audit log (settings saves, background job history) | ✓ | ✓ |
 | Multiple storage profiles | — | ✓ |
@@ -80,7 +80,7 @@ Amazon S3, Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2, and 
 
 - WordPress 6.7+
 - PHP 8.3+
-- Pro 1.1.x (if installed) requires Free active, version 1.1.0 or newer
+- Pro (if installed) requires Free/Core active, version 1.1.0 or newer
 
 ## Installation
 
@@ -111,11 +111,19 @@ Amazon S3, Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2, and 
 
 ## Migration
 
-**Universal Storage → Migration** — batch-migrate existing attachments with dry-run, retry-failed, and verify modes. Large local uploads resume safely after interruption using durable multipart state. The same screen also imports existing inventory from **WP Offload Media** or **Advanced Media Offloader**: detection is read-only, a dry-run is mandatory before import, exact remote keys are HEAD-verified, and no credentials are copied from the other plugin. Imports never modify the other plugin's data. Large libraries should prefer WP-CLI (below) for unattended runs.
+**Universal Storage → Migration** — batch-migrate existing attachments with dry-run, retry-failed, and verify modes. Large local uploads resume safely after interruption using durable multipart state. The same screen also imports existing inventory from **WP Offload Media**, **Advanced Media Offloader**, or **Media Cloud** (S3-compatible drivers with retained exact object keys): detection is read-only, a dry-run is mandatory before import, exact remote keys are HEAD-verified, and no credentials are copied from the other plugin. Imports never modify the other plugin's data. Large libraries should prefer WP-CLI (below) for unattended runs.
 
 ## Health
 
 **Universal Storage → Health** — health checks, object-inventory stats, and an AWS setup assistant (checklist + a least-privilege IAM policy for your bucket/prefix). Pro adds orphan scan (a dry-run comparison of what's actually in your bucket against what the plugin's inventory expects — it only ever reports, never deletes) and advanced reconcile.
+
+## Integrity
+
+**Universal Storage → Integrity** — one place to check and recover media. **Verify** checks every inventoried file on its own storage profile and compares the remote size with the local file (or, for offloaded-only files, with the recorded size). **Repair / Retry** re-uploads files that failed or went missing, from local copies that still exist. **Delivery drift** reports where WordPress references (metadata and post content), the inventory, local files and delivery disagree — for example a post linking a file that now exists only in storage, or an old image version still used in content — with a suggested next step; it is report-only and never rewrites content. **Policy** compares the files on this server with your local file policy and can clean up retained local copies (still only after verified remote delivery) or download missing ones back. Verify, Repair and Policy always start with a dry run that changes nothing; Apply acts only on the rows that dry run listed, records only confirmed results (a timeout or permission error is never recorded as missing, recorded sizes are never overwritten), and is written to the activity log. Free, no Pro required.
+
+## Safe Mode (clones, staging, shared prefixes)
+
+Copying a site's database to staging or another server would otherwise let the copy upload over, or delete, the original site's media. Each site records its own identity (a random id, its address and environment, nothing secret). When the plugin runs at a different address or in a non-production environment than it was set up on, it pauses every write to storage: existing media keeps being delivered, new uploads stay on the server, deleting media keeps the remote files. The first write to a bucket prefix also leaves a small ownership marker (`.kazcode-site-owner.json`), so two installations can't silently share one prefix. A notice in wp-admin explains the reason and lets an administrator confirm "same site, moved", "separate copy" (which then needs its own prefix) or take over a prefix whose previous owner is gone. Every decision is logged.
 
 ## Local storage policies
 

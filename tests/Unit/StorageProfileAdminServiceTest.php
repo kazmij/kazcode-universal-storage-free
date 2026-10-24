@@ -130,6 +130,19 @@ final class StorageProfileAdminServiceTest extends TestCase {
 		$this->assertTrue( $result['success'] );
 	}
 
+	public function test_active_direct_upload_reference_locks_profile_location(): void {
+		$profile = $this->profile( 1, false, false );
+		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
+		$profiles->method( 'find' )->willReturn( $profile );
+		$profiles->method( 'count' )->willReturn( 1 );
+		$profiles->expects( $this->once() )->method( 'update' )->with( $this->callback( static fn( StorageProfile $saved ): bool => $saved->bucket === $profile->bucket && $saved->prefix === $profile->prefix ) );
+		$objects = $this->createMock( ObjectRepository::class ); $objects->method( 'count_by_profile' )->willReturn( 0 );
+		add_filter( 'kazus_profile_has_active_direct_upload_reference', static fn() => true );
+		$result = ( new StorageProfileAdminService( $this->createMock( Settings::class ), $profiles, $objects ) )->update( 1, array( 'name' => 'Profile 1', 'bucket' => 'changed-bucket', 'prefix' => 'changed/' ) );
+		remove_all_filters( 'kazus_profile_has_active_direct_upload_reference' );
+		$this->assertTrue( $result['success'] );
+	}
+
 	/**
 	 * Deleting one of several profiles is a Pro-owned product operation
 	 * (see AdditionalStorageProfileService in the Pro plugin, and its own

@@ -42,7 +42,13 @@ final class AttachmentSyncDeriver {
 			}
 			++$active;
 			if ( $remote === ObjectRemoteStatus::PRESENT ) {
-				++$present;
+				// Existence-only inventory (present without verified_at) must not roll up as
+				// fully offloaded — size was never verified for that variant.
+				if ( empty( $row['verified_at'] ) ) {
+					++$pending;
+				} else {
+					++$present;
+				}
 			} elseif ( $remote === ObjectRemoteStatus::FAILED ) {
 				++$failed;
 			} elseif ( in_array( $remote, array( ObjectRemoteStatus::PENDING, ObjectRemoteStatus::UPLOADING, ObjectRemoteStatus::MISSING ), true ) ) {

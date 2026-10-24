@@ -260,6 +260,31 @@
 						data = await post('verify-batch', { batch_size: batchSize, after_id: afterId });
 					} else if (action === 'restore') {
 						data = await post('restore-batch', { batch_size: batchSize, after_id: afterId });
+						var warningIds = [];
+						if (data && Array.isArray(data.results)) {
+							data.results.forEach(function (r) {
+								if (r && r.status === 'warning_requires_acknowledge' && r.attachment_id) {
+									warningIds.push(r.attachment_id);
+								}
+							});
+						}
+						if (warningIds.length) {
+							var ackMsg = (s3msAdmin.i18n && s3msAdmin.i18n.restoreWarningAck)
+								? s3msAdmin.i18n.restoreWarningAck
+								: 'Restore preflight WARNING for ' + warningIds.length + ' attachment(s). Acknowledge and proceed?';
+							if (window.confirm(ackMsg)) {
+								for (var wi = 0; wi < warningIds.length; wi++) {
+									var ackData = await post('restore-batch', {
+										batch_size: 1,
+										attachment_id: warningIds[wi],
+										acknowledge_warning: true
+									});
+									appendLog(log, 'Ack restore #' + warningIds[wi] + ': ' + JSON.stringify(ackData));
+								}
+							} else {
+								appendLog(log, 'WARNING restore skipped without acknowledge for: ' + warningIds.join(', '));
+							}
+						}
 					} else if (action === 'adopt') {
 						data = await post('adopt-batch', { batch_size: batchSize, after_id: afterId });
 					} else {

@@ -36,6 +36,7 @@ final class ResumableTransferServiceTest extends TestCase {
 		remove_all_filters( 'kazus_multipart_threshold_bytes' );
 		remove_all_filters( 'kazus_multipart_part_size_bytes' );
 		remove_all_filters( 'kazus_multipart_concurrency' );
+		remove_all_filters( 'kazus_multipart_max_parts_per_execution' );
 		$this->sessions = new FakeTransferSessionRepository();
 		$this->gateway  = new FakeTransferGateway( 77 );
 		$this->source_gateway = new FakeTransferGateway( 11 );
@@ -52,6 +53,7 @@ final class ResumableTransferServiceTest extends TestCase {
 		remove_all_filters( 'kazus_multipart_threshold_bytes' );
 		remove_all_filters( 'kazus_multipart_part_size_bytes' );
 		remove_all_filters( 'kazus_multipart_concurrency' );
+		remove_all_filters( 'kazus_multipart_max_parts_per_execution' );
 		parent::tearDown();
 	}
 
@@ -328,6 +330,141 @@ final class ResumableTransferServiceTest extends TestCase {
 		);
 		$this->assertSame( array( 'head', 'remote_copy:single', 'head' ), $this->events );
 		$this->assertSame( array(), $this->sessions->created );
+	}
+
+	public function test_forced_small_remote_copy_persists_multipart_authority_before_transferring_bytes(): void {
+		// Direct Upload migration uses this mode when CopyObject could outlive its
+		// attachment lease. The callback must run before the first part, giving
+		// deletion a durable upload ID it can abort and settle.
+		add_filter( 'kazus_multipart_threshold_bytes', static fn(): int => 100 );
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11, 'etag' => 'source-etag' );
+		$this->source_gateway->range_bodies['source-key'] = 'remote body';
+		$this->destination_gateway->created_upload_ids[] = 'fenced-upload';
+		$this->destination_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11 );
+		$callback_upload_id = '';
+
+		$result = $this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', 11, static function ( string $upload_id ) use ( &$callback_upload_id ): bool {
+			$callback_upload_id = $upload_id;
+			return true;
+		}, true );
+
+		$this->assertTrue( $result['verified_complete'] );
+		$this->assertSame( 'fenced-upload', $callback_upload_id );
+		$this->assertSame( 'fenced-upload', $this->sessions->created[0]['multipart_upload_id'] );
+		$this->assertSame( 64 * 1024 * 1024, $this->sessions->created[0]['part_size_bytes'] );
+		$this->assertSame( array(), $this->destination_gateway->put_file_calls, 'Forced Direct Upload migration must not fall back to an untracked single PUT.' );
+		$this->assertSame( 'multipart:create', $this->events[1] );
+		$this->assertSame( 'session:create', $this->events[2] );
+		$this->assertSame( 'part:1', $this->events[3] );
+		$this->assertSame( array( array( 'key' => 'source-key', 'start' => 0, 'end' => 10 ) ), $this->source_gateway->range_calls );
+		$this->assertSame( 11, $this->destination_gateway->uploaded_parts[0]['content_length'] );
+	}
+
+	public function test_forced_remote_copy_aborts_a_new_provider_upload_when_the_durable_fence_rejects_it(): void {
+		add_filter( 'kazus_multipart_threshold_bytes', static fn(): int => 100 );
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11, 'etag' => 'source-etag' );
+		$this->destination_gateway->created_upload_ids[] = 'conflicting-provider-upload';
+
+		try {
+			$this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', 11, static fn( string $upload_id ): bool => false, true );
+			$this->fail( 'A migration fence identity mismatch must reject the new provider upload.' );
+		} catch ( \RuntimeException $error ) {
+			$this->assertStringContainsString( 'authority could not be persisted', $error->getMessage() );
+		}
+
+		$this->assertSame( array( array( 'key' => 'destination-key', 'upload_id' => 'conflicting-provider-upload' ) ), $this->destination_gateway->aborted_uploads );
+		$this->assertSame( array(), $this->destination_gateway->uploaded_parts );
+	}
+
+	public function test_rejected_new_remote_copy_session_is_aborted_and_a_retry_creates_a_replacement(): void {
+		// Catches: retaining an aborted provider upload as the newest resumable
+		// session, which would make every retry ListParts that dead upload ID.
+		add_filter( 'kazus_multipart_threshold_bytes', static fn(): int => 100 );
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11, 'etag' => 'source-etag' );
+		$this->destination_gateway->created_upload_ids = array( 'rejected-upload', 'replacement-upload' );
+
+		try {
+			$this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', 11, static fn( string $upload_id ): bool => false, true );
+			$this->fail( 'The rejected authority must stop the first transfer.' );
+		} catch ( \RuntimeException $error ) {
+			$this->assertStringContainsString( 'authority could not be persisted', $error->getMessage() );
+		}
+
+		$this->assertSame( TransferSessionStatus::ABORTED, $this->sessions->updates[1]['status'] );
+		$this->assertSame( 'multipart_authority_rejected', $this->sessions->updates[1]['last_error_code'] );
+		$this->sessions->resumable = array_merge( $this->sessions->created[0], $this->sessions->updates[1], array( 'id' => 1 ) );
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11, 'etag' => 'source-etag' );
+		$this->source_gateway->range_bodies['source-key'] = 'remote body';
+		$this->destination_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11 );
+
+		$result = $this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', 11, null, true );
+
+		$this->assertTrue( $result['verified_complete'] );
+		$this->assertFalse( $result['resumed'] );
+		$this->assertSame( 'replacement-upload', $this->sessions->created[1]['multipart_upload_id'] );
+		$this->assertSame( array(), $this->destination_gateway->list_parts_results, 'The rejected upload ID must never be resumed.' );
+	}
+
+	public function test_rejected_newest_remote_copy_session_does_not_shadow_an_older_resumable_session(): void {
+		// Catches: the terminal rejected row sorting ahead of an older live
+		// provider upload instead of allowing the normal bounded resume.
+		add_filter( 'kazus_multipart_threshold_bytes', static fn(): int => 100 );
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11, 'etag' => 'source-etag' );
+		$this->destination_gateway->created_upload_ids[] = 'rejected-upload';
+		try {
+			$this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', 11, static fn( string $upload_id ): bool => false, true );
+			$this->fail( 'The rejected authority must stop the first transfer.' );
+		} catch ( \RuntimeException ) {
+		}
+
+		$this->sessions->resumable = array(
+			'id' => 77, 'uuid' => 'older-resumable', 'kind' => 'remote_copy', 'attachment_id' => 123,
+			'source_profile_id' => 11, 'destination_profile_id' => 22, 'source_ref' => 'source-key',
+			'destination_key' => 'destination-key', 'size_bytes' => 11,
+			'source_fingerprint' => hash( 'sha256', '11|source-key|11|source-etag' ),
+			'multipart_upload_id' => 'older-live-upload', 'part_size_bytes' => 64 * 1024 * 1024,
+			'completed_parts' => array(), 'status' => TransferSessionStatus::UPLOADING,
+		);
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11, 'etag' => 'source-etag' );
+		$this->source_gateway->range_bodies['source-key'] = 'remote body';
+		$this->destination_gateway->head_results[] = array( 'exists' => true, 'content_length' => 11 );
+
+		$result = $this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', 11, null, true );
+
+		$this->assertTrue( $result['resumed'] );
+		$this->assertSame( 'older-live-upload', $this->destination_gateway->uploaded_parts[0]['upload_id'] );
+		$this->assertSame( 1, count( $this->sessions->created ), 'The older valid session must win over the rejected newest row.' );
+	}
+
+	public function test_forced_small_remote_copy_resumes_after_one_part_without_reuploading_it(): void {
+		// Catches: persisting a zero forced part size (intdiv on resume), or sending an
+		// already reconciled first part again after a bounded execution yields.
+		$size = ( 5 * 1024 * 1024 ) + 1;
+		add_filter( 'kazus_multipart_threshold_bytes', static fn(): int => 100 * 1024 * 1024 );
+		add_filter( 'kazus_multipart_part_size_bytes', static fn(): int => 5 * 1024 * 1024 );
+		add_filter( 'kazus_multipart_max_parts_per_execution', static fn(): int => 1 );
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => $size, 'etag' => 'source-etag' );
+		$this->destination_gateway->created_upload_ids[] = 'forced-resume-upload';
+
+		$first = $this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', $size, null, true );
+
+		$this->assertFalse( $first['success'] );
+		$this->assertSame( array( 1 ), array_column( $this->destination_gateway->uploaded_parts, 'part_number' ) );
+		$this->assertSame( 5 * 1024 * 1024, $this->sessions->created[0]['part_size_bytes'] );
+
+		$this->sessions->resumable = array_merge( $this->sessions->created[0], array( 'id' => 1, 'part_size_bytes' => 0 ) );
+		$this->destination_gateway->list_parts_results[] = array( 1 => array( 'etag' => 'provider-one', 'size' => 5 * 1024 * 1024 ) );
+		$this->source_gateway->head_results[] = array( 'exists' => true, 'content_length' => $size, 'etag' => 'source-etag' );
+		$this->destination_gateway->head_results[] = array( 'exists' => true, 'content_length' => $size );
+		remove_all_filters( 'kazus_multipart_max_parts_per_execution' );
+
+		$second = $this->remote_service()->copy_remote( 123, 11, 'source-key', 22, 'destination-key', 'application/octet-stream', '', $size, null, true );
+
+		$this->assertTrue( $second['success'] );
+		$this->assertTrue( $second['resumed'] );
+		$this->assertSame( 5 * 1024 * 1024, $this->sessions->updates[1]['part_size_bytes'] );
+		$this->assertSame( array( 1, 2 ), array_column( $this->destination_gateway->uploaded_parts, 'part_number' ) );
+		$this->assertSame( array( array( 'key' => 'source-key', 'start' => 5 * 1024 * 1024, 'end' => $size - 1 ) ), array_slice( $this->source_gateway->range_calls, 1 ) );
 	}
 
 	public function test_remote_copy_with_transient_destination_head_is_not_verified_complete(): void {

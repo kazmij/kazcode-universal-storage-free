@@ -72,6 +72,19 @@ Run against a WordPress site with the plugin activated and a writable S3 (or Min
 7. When commit polling returns `status=completed`, the state changes to Report, all run controls are disabled, the final counters remain visible, and multipart work is shown only as resumable transfer progress, never as S3 part-size/concurrency tuning controls.
 8. During any running dry-run or commit, Pause/Resume/Cancel call `POST kazcode-storage/v1/imports/{current_uuid}/pause|resume|cancel`; they must not operate without the current run UUID.
 
+
+## Scenario K — HEIC upload with retained source image
+
+Requires a WordPress host whose image editor can ingest HEIC (Imagick/HEIC support). Skip and record NOT_RUN if the environment cannot decode HEIC.
+
+1. Enable plugin; configure storage; keep local files initially.
+2. Upload a HEIC via Media → Add New.
+3. Confirm WordPress created a generated JPEG used as `_wp_attached_file` / Media Library preview.
+4. Confirm attachment metadata contains `original_image` pointing at the retained HEIC (or equivalent retained source filename).
+5. Confirm both variants are in inventory / expected keys (e.g. `wp eval` / REST object list / Integrity verify once shipped showing both the JPEG relative path and the HEIC/`original_image` sibling). Do **not** rely solely on `wp universal-storage verify --verbose` to print successful paths — current CLI only prints overall status and non-empty `details`, which are empty on successful HEADs.
+6. Enable delete-local after verify; re-offload or upload another HEIC; confirm both variants were uploaded before local cleanup.
+7. Frontend/Media Library must still render the JPEG derivative; retained HEIC must remain addressable via inventory.
+
 ## Scenario J — 1.1.0 release qualification
 
 Run these checks against the built ZIP, not a live source mount. Configure an S3-compatible
@@ -84,6 +97,7 @@ run UUIDs used for the run.
 4. Enable delete-local-after-upload for a test attachment. Confirm the local file remains if destination verification fails or is transient, and is removed only after verified destination success.
 5. With a WP Offload Media fixture/site, run Detect then a dry-run. Confirm the exact source keys are checked, no KAZCODE object inventory is written by the dry-run, and no source credentials appear in the response, DOM, logs, or report. Commit only after a completed matching dry-run and confirm verified objects are adopted without re-upload.
 6. Repeat step 5 with an Advanced Media Offloader fixture/site. Confirm malformed source data is skipped/reported rather than guessed and the competitor's data is unchanged.
+7. Repeat with a Media Cloud fixture that retains `ilab_s3_info` / metadata `s3.key` on an S3-compatible driver. Confirm GCS-native or keyless Imgix-only attachments are skipped with a clear unsupported message, not guessed.
 7. Force a transient/auth/network HEAD failure during either import. Confirm it is reported as transient and is not persisted as `missing` or used to mark the attachment offloaded.
 8. In Pro, interrupt a cross-provider migration after work begins. Confirm the source inventory row remains `present` and its delivery URL remains active.
 9. Complete a Pro cross-provider migration. Confirm the destination is HEAD-verified and committed before the source becomes `stale`, its URL changes, or source deletion is queued.

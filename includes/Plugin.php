@@ -11,11 +11,13 @@ namespace Kazcode\WpStorage;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Admin\AdminLegacyRedirects;
 use Kazcode\WpStorage\Admin\AdminMenu;
 use Kazcode\WpStorage\Admin\AttachmentDetailsPanel;
 use Kazcode\WpStorage\Admin\DashboardPage;
 use Kazcode\WpStorage\Admin\HealthPage;
+use Kazcode\WpStorage\Admin\IntegrityActions;
 use Kazcode\WpStorage\Admin\LogsPage;
 use Kazcode\WpStorage\Admin\MediaLibraryColumn;
 use Kazcode\WpStorage\Admin\MediaPage;
@@ -48,9 +50,15 @@ use Kazcode\WpStorage\Services\ConnectionTestService;
 use Kazcode\WpStorage\Services\CompetitorImportService;
 use Kazcode\WpStorage\Services\FailedItemsService;
 use Kazcode\WpStorage\Services\MigrationService;
+use Kazcode\WpStorage\Services\ProfileAwareObjectOperations;
+use Kazcode\WpStorage\Services\RebuildInventoryService;
+use Kazcode\WpStorage\Services\RestorePreflightService;
 use Kazcode\WpStorage\Services\ResumableTransferService;
+use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Services\StaleTransferCleanupService;
+use Kazcode\WpStorage\Services\ReservationCleanupService;
 use Kazcode\WpStorage\Services\VerificationService;
+use Kazcode\WpStorage\Services\UploadPathCollisionGuard;
 use Kazcode\WpStorage\Storage\ProfileStorageGateway;
 use Kazcode\WpStorage\Storage\PublicUrlResolver;
 use Kazcode\WpStorage\Storage\S3ClientFactory;
@@ -82,7 +90,10 @@ final class Plugin {
 	private ?FailedItemsService $failed_items = null;
 	private ?ResumableTransferService $resumable_transfers = null;
 	private ?StaleTransferCleanupService $stale_transfer_cleanup = null;
+	private ?ReservationCleanupService $reservation_cleanup = null;
 	private ?CompetitorImportService $competitor_imports = null;
+	private ?RebuildInventoryService $rebuild_inventory = null;
+	private ?RestorePreflightService $restore_preflight = null;
 
 	private function __construct() {
 		$this->settings = new Settings();
@@ -116,6 +127,24 @@ final class Plugin {
 
 		$this->maybe_upgrade_schema();
 
+		// Safe Mode (#61): bind this database to its site once, then refuse
+		// storage writes whenever it runs as a clone or on another site's prefix.
+		try {
+			\Kazcode\WpStorage\Core\SiteIdentity::bootstrap();
+		} catch ( \Throwable $e ) {
+			unset( $e ); // Option table not writable yet; retried on the next request.
+		}
+		\Kazcode\WpStorage\Core\SafeMode::enforce(
+			true,
+			static function (): bool {
+				try {
+					return ( new \Kazcode\WpStorage\Infrastructure\ObjectRepository() )->total_count() > 0;
+				} catch ( \Throwable $e ) {
+					return true; // Unknown: keep protecting.
+				}
+			}
+		);
+
 		add_action(
 			'update_option_' . Settings::OPTION_KEY,
 			/**
@@ -141,7 +170,7 @@ final class Plugin {
 				} catch ( \Throwable $e ) {
 					if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 						// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-						error_log( 'KAZCODE Universal Storage default profile sync failed: ' . $e->getMessage() );
+						error_log( 'KAZCODE Universal Storage default profile sync failed: ' . SecretRedactor::redact( $e ) );
 					}
 				}
 			},
@@ -166,6 +195,8 @@ final class Plugin {
 			$wizard        = new SetupWizardPage($this->settings);
 			(new AdminMenu($dashboard, $media, $storage, $migration, $health, $logs, $settings_page, $wizard))->register();
 			(new AdminLegacyRedirects())->register();
+			(new \Kazcode\WpStorage\Admin\SafeModeNotice())->register();
+			(new IntegrityActions())->register();
 			$settings_page->register();
 			$migration->register();
 			$wizard->register();
@@ -193,8 +224,10 @@ final class Plugin {
 		$this->background()->register();
 		$this->queue()->register();
 		$this->register_stale_transfer_cleanup();
+		$this->register_reservation_cleanup();
 		$this->url_filter()->register();
 		$this->offloader()->register();
+		( new UploadPathCollisionGuard() )->register();
 		$this->local_file_provider()->register();
 		$this->restorer()->register_delete_hooks();
 		(new BatchProcessor($this->migration_service()))->register();
@@ -237,7 +270,7 @@ final class Plugin {
 			// Schema may not be writable yet; do not fatally break site boot.
 			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 				// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				error_log( 'KAZCODE Universal Storage schema/profile upgrade: ' . $e->getMessage() );
+				error_log( 'KAZCODE Universal Storage schema/profile upgrade: ' . SecretRedactor::redact( $e ) );
 			}
 		}
 	}
@@ -369,6 +402,16 @@ final class Plugin {
 		}
 	}
 
+	private function reservation_cleanup(): ReservationCleanupService {
+		return $this->reservation_cleanup ??= new ReservationCleanupService( new \Kazcode\WpStorage\Infrastructure\ReservationCleanupRepository(), new \Kazcode\WpStorage\Infrastructure\ReservationRepository(), null, new ProfileAwareObjectOperations( settings: $this->settings ) );
+	}
+
+	private function register_reservation_cleanup(): void {
+		$hook = 'kazus_reservation_cleanup';
+		add_action( $hook, array( $this->reservation_cleanup(), 'run' ) );
+		if ( ! wp_next_scheduled( $hook ) ) wp_schedule_event( time() + 3600, 'daily', $hook );
+	}
+
 	/**
 	 * Shared competitor import orchestration service.
 	 */
@@ -385,6 +428,44 @@ final class Plugin {
 			);
 		}
 		return $this->competitor_imports;
+	}
+
+	/**
+	 * Rebuild Storage Inventory facade (Integrity §6.3).
+	 */
+	public function rebuild_inventory(): RebuildInventoryService {
+		if ( $this->rebuild_inventory === null ) {
+			$profiles = new WpdbStorageProfileRepository();
+			$this->rebuild_inventory = new RebuildInventoryService(
+				$this->settings,
+				null,
+				null,
+				$profiles,
+				null,
+				null,
+				ImportRegistry::defaults()
+			);
+		}
+		return $this->rebuild_inventory;
+	}
+
+	/**
+	 * Restore Preflight facade (Integrity §6.4).
+	 */
+	public function restore_preflight(): RestorePreflightService {
+		if ( $this->restore_preflight === null ) {
+			$profiles = new WpdbStorageProfileRepository();
+			$objects  = new ObjectRepository();
+			$this->restore_preflight = new RestorePreflightService(
+				$this->settings,
+				$objects,
+				$profiles,
+				null,
+				ImportRegistry::defaults(),
+				$this->storage()
+			);
+		}
+		return $this->restore_preflight;
 	}
 
 	/**
@@ -427,7 +508,14 @@ final class Plugin {
 	 */
 	public function restorer(): AttachmentRestorer {
 		if ($this->restorer === null) {
-			$this->restorer = new AttachmentRestorer($this->settings, $this->storage());
+			$this->restorer = new AttachmentRestorer(
+				$this->settings,
+				$this->storage(),
+				null,
+				null,
+				null,
+				$this->restore_preflight()
+			);
 		}
 		return $this->restorer;
 	}

@@ -48,6 +48,10 @@ final class HealthPage {
 			);
 			AdminLayout::subnav( AdminMenu::HEALTH_SLUG );
 			?>
+			<div class="notice notice-info inline s3ms-notice" data-integrity-link><p>
+				<?php esc_html_e( 'Recovery — verify, repair, rebuild inventory and restore preflight — is gathered in Integrity.', 'kazcode-universal-storage' ); ?>
+				<a href="<?php echo esc_url( IntegrityPage::url() ); ?>"><?php esc_html_e( 'Open Integrity', 'kazcode-universal-storage' ); ?></a>
+			</p></div>
 			<?php AdminLayout::tour_replay_button( 4 ); ?>
 
 			<div class="notice notice-info inline s3ms-notice"><p>

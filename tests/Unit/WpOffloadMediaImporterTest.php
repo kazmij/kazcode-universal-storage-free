@@ -382,7 +382,129 @@ final class WpOffloadMediaImporterTest extends TestCase {
 		$this->assertSame( array(), $GLOBALS['wpdb']->writes );
 	}
 
+	public function test_descriptors_for_attachment_skips_query_when_items_table_missing(): void {
+		$wpdb = new WpOffloadMediaWpdbStub();
+		$wpdb->items_table_exists = false;
+		$GLOBALS['wpdb']          = $wpdb;
+
+		$descriptors = ( new WpOffloadMediaImporter() )->descriptors_for_attachment( 42 );
+
+		$this->assertSame( array(), $descriptors );
+		$this->assertNotEmpty( $wpdb->show_table_queries );
+		$this->assertSame( array(), $wpdb->select_queries );
+	}
+
+	public function test_scan_skips_as3cf_files_when_files_table_missing(): void {
+		WpStubs::$options['tantan_wordpress_s3'] = array(
+			'provider' => 'aws',
+			'bucket'   => 'media-bucket',
+			'region'   => 'eu-central-1',
+		);
+		$this->seed_attachment( 220, 'image/jpeg', '2026/09/legacy.jpg', array( 'file' => '2026/09/legacy.jpg' ) );
+		$wpdb = new WpOffloadMediaWpdbStub();
+		$wpdb->files_table_exists = false;
+		$wpdb->as3cf_items        = array(
+			220 => array(
+				'id'          => 30,
+				'source_type' => 'media-library',
+				'source_id'   => 220,
+				'provider'    => 'aws',
+				'region'      => 'eu-central-1',
+				'bucket'      => 'media-bucket',
+				'path'        => 'exact/legacy.jpg',
+				'extra_info'  => serialize( array( 'objects' => array() ) ),
+			),
+		);
+		$GLOBALS['wpdb'] = $wpdb;
+
+		$page = ( new WpOffloadMediaImporter() )->scan_page( 10, 0 );
+
+		$this->assertCount( 1, $page->descriptors() );
+		$this->assertSame( 'exact/legacy.jpg', $page->descriptors()[0]->source_object_key() );
+		foreach ( $wpdb->select_queries as $query ) {
+			$this->assertStringNotContainsString( 'as3cf_files', $query );
+		}
+	}
+
 	/** @param array<string, mixed> $metadata */
+
+	public function test_fingerprint_does_not_infer_endpoint_from_current_settings(): void {
+		WpStubs::$options['tantan_wordpress_s3'] = array(
+			'provider' => 'aws',
+			'bucket'   => 'media-bucket',
+			'region'   => 'eu-central-1',
+			'endpoint' => 'http://minio-b.example:9000',
+		);
+		$this->seed_attachment(
+			501,
+			'image/jpeg',
+			'2026/09/hist.jpg',
+			array(
+				'file'     => '2026/09/hist.jpg',
+				'filesize' => 100,
+			)
+		);
+		$GLOBALS['wpdb']->as3cf_items = array(
+			501 => array(
+				'id'                   => 51,
+				'source_type'          => 'media-library',
+				'source_id'            => 501,
+				'provider'             => 'aws',
+				'region'               => 'eu-central-1',
+				'bucket'               => 'media-bucket',
+				'path'                 => 'custom/hist.jpg',
+				'original_path'        => '',
+				'is_private'           => 0,
+				'source_path'          => '2026/09/hist.jpg',
+				'original_source_path' => '',
+				'extra_info'           => serialize( array( 'objects' => array() ) ),
+			),
+		);
+
+		$page = ( new WpOffloadMediaImporter() )->scan_page( 1, 500 );
+		$this->assertCount( 1, $page->descriptors() );
+		$this->assertSame(
+			'wp-offload-media:aws:media-bucket:eu-central-1',
+			$page->descriptors()[0]->source_fingerprint()
+		);
+		$this->assertStringNotContainsString( 'minio-b.example', $page->descriptors()[0]->source_fingerprint() );
+	}
+
+	public function test_fingerprint_embeds_row_level_endpoint_when_present(): void {
+		$this->seed_attachment(
+			502,
+			'image/jpeg',
+			'2026/09/with-ep.jpg',
+			array(
+				'file'     => '2026/09/with-ep.jpg',
+				'filesize' => 100,
+			)
+		);
+		$GLOBALS['wpdb']->as3cf_items = array(
+			502 => array(
+				'id'                   => 52,
+				'source_type'          => 'media-library',
+				'source_id'            => 502,
+				'provider'             => 'aws',
+				'region'               => 'eu-central-1',
+				'bucket'               => 'media-bucket',
+				'endpoint'             => 'http://minio-a.example:9000',
+				'path'                 => 'custom/with-ep.jpg',
+				'original_path'        => '',
+				'is_private'           => 0,
+				'source_path'          => '2026/09/with-ep.jpg',
+				'original_source_path' => '',
+				'extra_info'           => serialize( array( 'objects' => array() ) ),
+			),
+		);
+
+		$page = ( new WpOffloadMediaImporter() )->scan_page( 1, 501 );
+		$this->assertSame(
+			'wp-offload-media:aws:media-bucket:eu-central-1:http://minio-a.example:9000',
+			$page->descriptors()[0]->source_fingerprint()
+		);
+	}
+
 	private function seed_attachment( int $id, string $mime, string $attached_file, array $metadata ): void {
 		WpStubs::$posts[ $id ] = (object) array(
 			'ID'             => $id,
@@ -396,12 +518,18 @@ final class WpOffloadMediaImporterTest extends TestCase {
 
 final class WpOffloadMediaWpdbStub {
 	public string $prefix = 'wp_';
+	public bool $items_table_exists = true;
+	public bool $files_table_exists = true;
 	/** @var array<int, array<string, mixed>> */
 	public array $as3cf_items = array();
 	/** @var list<array<string, mixed>> */
 	public array $as3cf_files = array();
 	/** @var list<array<string, mixed>> */
 	public array $writes = array();
+	/** @var list<string> */
+	public array $show_table_queries = array();
+	/** @var list<string> */
+	public array $select_queries = array();
 
 	public function prepare( string $query, ...$args ): string {
 		foreach ( $args as $arg ) {
@@ -411,8 +539,21 @@ final class WpOffloadMediaWpdbStub {
 		return $query;
 	}
 
+	public function get_var( string $query ): ?string {
+		if ( str_contains( $query, 'SHOW TABLES' ) && str_contains( $query, 'as3cf_items' ) ) {
+			$this->show_table_queries[] = $query;
+			return $this->items_table_exists ? $this->prefix . 'as3cf_items' : null;
+		}
+		if ( str_contains( $query, 'SHOW TABLES' ) && str_contains( $query, 'as3cf_files' ) ) {
+			$this->show_table_queries[] = $query;
+			return $this->files_table_exists ? $this->prefix . 'as3cf_files' : null;
+		}
+		return null;
+	}
+
 	/** @return list<array<string, mixed>> */
 	public function get_results( string $query, string $output = ARRAY_A ): array {
+		$this->select_queries[] = $query;
 		if ( str_contains( $query, 'as3cf_files' ) ) {
 			preg_match( '/item_id = (\\d+)/', $query, $item );
 			preg_match( '/source_id = (\\d+)/', $query, $source );

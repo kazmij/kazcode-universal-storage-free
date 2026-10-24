@@ -1,6 +1,6 @@
 <?php
 /**
- * CleanupLocalFiles policy tests.
+ * CleanupLocalFiles policy, gate and revalidation tests (#53).
  *
  * @package Kazcode\WpStorage
  */
@@ -12,8 +12,8 @@ namespace Kazcode\WpStorage\Tests;
 use PHPUnit\Framework\TestCase;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\LocalStoragePolicy;
+use Kazcode\WpStorage\Services\CleanupEligibility;
 use Kazcode\WpStorage\Services\CleanupLocalFiles;
-use Kazcode\WpStorage\Storage\S3KeyResolver;
 use Kazcode\WpStorage\Storage\S3Storage;
 use Kazcode\WpStorage\Tests\Support\WpStubs;
 
@@ -33,32 +33,24 @@ final class CleanupLocalFilesTest extends TestCase {
 		WpStubs::reset();
 	}
 
-	public function test_keep_all_skips_delete(): void {
+	public function test_keep_all_skips_delete_without_evaluating(): void {
 		$settings = $this->settings_with_policy( LocalStoragePolicy::KEEP_ALL );
 		$files    = $this->sample_files();
+		$eligibility = $this->createMock( CleanupEligibility::class );
+		$eligibility->expects( $this->never() )->method( 'evaluate' );
 
-		$result = ( new CleanupLocalFiles( $settings, $this->storage_mock( true ) ) )->maybe_cleanup(
-			1,
-			$files,
-			$this->manifest_items(),
-			null
-		);
+		$result = $this->cleanup( $settings, $eligibility )->maybe_cleanup( 1, $files, $this->manifest_items(), null );
 
 		$this->assertTrue( $result['skipped'] );
 		$this->assertSame( 0, $result['deleted'] );
 		$this->assertFileExists( $files['2026/08/photo.jpg'] );
 	}
 
-	public function test_remote_only_deletes_after_verify(): void {
+	public function test_remote_only_deletes_after_eligibility_and_unchanged_manifest(): void {
 		$settings = $this->settings_with_policy( LocalStoragePolicy::REMOTE_ONLY );
 		$files    = $this->sample_files();
 
-		$result = ( new CleanupLocalFiles( $settings, $this->storage_mock( true ) ) )->maybe_cleanup(
-			2,
-			$files,
-			$this->manifest_items(),
-			null
-		);
+		$result = $this->cleanup( $settings, $this->eligibility( true ) )->maybe_cleanup( 2, $files, $this->manifest_items(), null, 1 );
 
 		$this->assertFalse( $result['skipped'] );
 		$this->assertSame( 2, $result['deleted'] );
@@ -68,56 +60,103 @@ final class CleanupLocalFilesTest extends TestCase {
 		}
 	}
 
-	public function test_keep_originals_deletes_only_sizes(): void {
-		$settings = $this->settings_with_policy( LocalStoragePolicy::KEEP_ORIGINALS );
-		$files    = $this->sample_files();
+	public function test_profile_and_full_manifest_are_passed_to_eligibility(): void {
+		$settings    = $this->settings_with_policy( LocalStoragePolicy::KEEP_ORIGINALS );
+		$files       = $this->sample_files();
+		$eligibility = $this->createMock( CleanupEligibility::class );
+		$eligibility->expects( $this->once() )
+			->method( 'evaluate' )
+			->with( 3, $this->manifest_items(), $files, array( '2026/08/photo-150.jpg' => $files['2026/08/photo-150.jpg'] ), 9 )
+			->willReturn( array( 'eligible' => true, 'reason' => '', 'relative' => '' ) );
 
-		$result = ( new CleanupLocalFiles( $settings, $this->storage_mock( true ) ) )->maybe_cleanup(
-			3,
-			$files,
-			$this->manifest_items(),
-			null
-		);
+		$result = $this->cleanup( $settings, $eligibility )->maybe_cleanup( 3, $files, $this->manifest_items(), null, 9 );
 
-		$this->assertFalse( $result['skipped'] );
 		$this->assertSame( 1, $result['deleted'] );
 		$this->assertFileExists( $files['2026/08/photo.jpg'] );
 		$this->assertFileDoesNotExist( $files['2026/08/photo-150.jpg'] );
 	}
 
-	public function test_verify_failure_skips_delete(): void {
+	public function test_blocked_eligibility_keeps_files_and_records_sanitized_reason(): void {
 		$settings = $this->settings_with_policy( LocalStoragePolicy::REMOTE_ONLY );
 		$files    = $this->sample_files();
 
-		$result = ( new CleanupLocalFiles( $settings, $this->storage_mock( false ) ) )->maybe_cleanup(
-			4,
-			$files,
-			$this->manifest_items(),
-			null
-		);
+		$result = $this->cleanup( $settings, $this->eligibility( false, CleanupEligibility::DELIVERY_NOT_REMOTE, '2026/08/photo.jpg' ) )
+			->maybe_cleanup( 4, $files, $this->manifest_items(), null );
 
 		$this->assertTrue( $result['skipped'] );
-		$this->assertStringContainsString( 'verify failure', $result['message'] );
+		$this->assertSame( CleanupEligibility::DELIVERY_NOT_REMOTE, $result['blocked_reason'] );
+		$this->assertSame( array(), WpStubs::$deleted_files );
 		$this->assertFileExists( $files['2026/08/photo.jpg'] );
+		$this->assertSame(
+			'Offloaded but local delete skipped (delivery_not_remote: 2026/08/photo.jpg)',
+			WpStubs::$post_meta[4]['_s3ms_last_error'] ?? null
+		);
 	}
 
-	public function test_existing_remote_without_matching_size_skips_delete(): void {
+	public function test_metadata_changed_after_verification_blocks_stale_deletion(): void {
+		$settings = $this->settings_with_policy( LocalStoragePolicy::REMOTE_ONLY );
+		$files    = $this->sample_files();
+		$changed  = array_merge(
+			$this->manifest_items(),
+			array( array( 'relative' => '2026/08/photo-300.jpg', 'variant_type' => 'size' ) )
+		);
+
+		$result = $this->cleanup( $settings, $this->eligibility( true ), static fn(): array => $changed )
+			->maybe_cleanup( 5, $files, $this->manifest_items(), null );
+
+		$this->assertTrue( $result['skipped'] );
+		$this->assertSame( CleanupLocalFiles::MANIFEST_CHANGED, $result['blocked_reason'] );
+		$this->assertSame( array(), WpStubs::$deleted_files );
+	}
+
+	public function test_manifest_reread_failure_fails_closed(): void {
 		$settings = $this->settings_with_policy( LocalStoragePolicy::REMOTE_ONLY );
 		$files    = $this->sample_files();
 
-		$storage = $this->storage_mock( true, 999 );
+		$result = $this->cleanup(
+			$settings,
+			$this->eligibility( true ),
+			static function (): array {
+				throw new \RuntimeException( 'metadata unreadable' );
+			}
+		)->maybe_cleanup( 6, $files, $this->manifest_items(), null );
 
-		$result = ( new CleanupLocalFiles( $settings, $storage ) )->maybe_cleanup(
-			5,
-			$files,
-			$this->manifest_items(),
-			null
-		);
-
-		$this->assertTrue( $result['skipped'] );
-		$this->assertStringContainsString( 'verify failure', $result['message'] );
-		$this->assertFileExists( $files['2026/08/photo.jpg'] );
+		$this->assertSame( CleanupLocalFiles::MANIFEST_CHANGED, $result['blocked_reason'] );
 		$this->assertSame( array(), WpStubs::$deleted_files );
+	}
+
+	public function test_retry_after_interrupted_cleanup_deletes_remaining_files(): void {
+		$settings = $this->settings_with_policy( LocalStoragePolicy::REMOTE_ONLY );
+		$files    = $this->sample_files();
+		unlink( $files['2026/08/photo-150.jpg'] );
+		$remaining = array( '2026/08/photo.jpg' => $files['2026/08/photo.jpg'] );
+
+		$result = $this->cleanup( $settings, $this->eligibility( true ) )->maybe_cleanup( 7, $remaining, $this->manifest_items(), null );
+
+		$this->assertSame( 1, $result['deleted'] );
+		$this->assertFileDoesNotExist( $files['2026/08/photo.jpg'] );
+	}
+
+	private function cleanup( Settings $settings, CleanupEligibility $eligibility, ?callable $manifest = null ): CleanupLocalFiles {
+		$items = $this->manifest_items();
+		return new CleanupLocalFiles(
+			$settings,
+			$this->createMock( S3Storage::class ),
+			$eligibility,
+			$manifest ?? static fn(): array => $items
+		);
+	}
+
+	private function eligibility( bool $eligible, string $reason = '', string $relative = '' ): CleanupEligibility {
+		$eligibility = $this->createMock( CleanupEligibility::class );
+		$eligibility->method( 'evaluate' )->willReturn(
+			array(
+				'eligible' => $eligible,
+				'reason'   => $reason,
+				'relative' => $relative,
+			)
+		);
+		return $eligibility;
 	}
 
 	/**
@@ -152,20 +191,6 @@ final class CleanupLocalFilesTest extends TestCase {
 		$settings = $this->createMock( Settings::class );
 		$settings->method( 'local_storage_policy' )->willReturn( $policy );
 		return $settings;
-	}
-
-	private function storage_mock( bool $remote_exists, ?int $content_length = 1 ): S3Storage {
-		$settings = $this->createMock( Settings::class );
-		$settings->method( 'get' )->willReturn( '' );
-		$storage = $this->createMock( S3Storage::class );
-		$storage->method( 'keys' )->willReturn( new S3KeyResolver( $settings ) );
-		$result = array( 'exists' => $remote_exists );
-		if ( $content_length !== null ) {
-			$result['content_length'] = $content_length;
-		}
-		$storage->method( 'head_relative' )->willReturn( $result );
-		$storage->method( 'head_key' )->willReturn( $result );
-		return $storage;
 	}
 
 	private function touch( string $relative ): string {

@@ -11,6 +11,7 @@ namespace Kazcode\WpStorage\Services;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Features;
 use Kazcode\WpStorage\Core\ProServices;
 use Kazcode\WpStorage\Core\Settings;
@@ -100,7 +101,7 @@ final class HealthCheckService {
 				$conn_detail = $conn_ok ? __( 'Put/Head/Delete succeeded', 'kazcode-universal-storage' ) : __( 'See Test connection steps', 'kazcode-universal-storage' );
 			} catch ( \Throwable $e ) {
 				$conn_ok = false;
-				$conn_detail = $e->getMessage();
+				$conn_detail = SecretRedactor::redact( $e );
 			}
 		}
 		$checks[] = $this->check(

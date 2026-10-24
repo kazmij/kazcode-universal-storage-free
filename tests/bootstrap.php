@@ -23,6 +23,10 @@ require_once $autoload;
 
 \DG\BypassFinals::enable();
 
+// wpdb::get_row() accepts this WordPress output mode. Unit tests use fakes
+// outside WordPress, so provide the same global constant before repositories run.
+defined( 'ARRAY_A' ) || define( 'ARRAY_A', 'ARRAY_A' );
+
 use Kazcode\WpStorage\Tests\Support\WpStubs;
 
 // Minimal stubs used by Settings/PublicUrlResolver when WP is absent.
@@ -103,7 +107,7 @@ if (!function_exists('__')) {
 }
 if (!function_exists('is_admin')) {
 	function is_admin() {
-		return false;
+		return WpStubs::$is_admin;
 	}
 }
 
@@ -136,10 +140,52 @@ if (!function_exists('get_post_meta')) {
 		return $single ? $value : array( $value );
 	}
 }
+if (!function_exists('wp_slash')) {
+	function wp_slash($value) {
+		return is_string( $value ) && WpStubs::$post_meta_stripslashes ? addslashes( $value ) : $value;
+	}
+}
 if (!function_exists('update_post_meta')) {
 	function update_post_meta($post_id, $meta_key, $meta_value, $prev_value = '') { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		if ( WpStubs::$post_meta_stripslashes && is_string( $meta_value ) ) {
+			$meta_value = stripslashes( $meta_value );
+		}
+		if ( ! empty( WpStubs::$post_meta_update_failures[ (int) $post_id ][ (string) $meta_key ] ) ) {
+			return false;
+		}
+		if ((WpStubs::$post_meta[ (int) $post_id ][ (string) $meta_key ] ?? null) === $meta_value) {
+			return false;
+		}
 		WpStubs::$post_meta[ (int) $post_id ][ (string) $meta_key ] = $meta_value;
 		return true;
+	}
+}
+if (!function_exists('add_post_meta')) {
+	function add_post_meta($post_id, $meta_key, $meta_value, $unique = false) {
+		if ( WpStubs::$post_meta_stripslashes && is_string( $meta_value ) ) {
+			$meta_value = stripslashes( $meta_value );
+		}
+		$id = (int) $post_id;
+		$key = (string) $meta_key;
+		if ( ! empty( WpStubs::$post_meta_add_failures[ $id ][ $key ] ) ) {
+			return false;
+		}
+		if ( array_key_exists( $key, WpStubs::$post_meta_add_conflicts[ $id ] ?? array() ) ) {
+			WpStubs::$post_meta[ $id ][ $key ] = WpStubs::$post_meta_add_conflicts[ $id ][ $key ];
+			return false;
+		}
+		if ($unique && array_key_exists($key, WpStubs::$post_meta[ $id ] ?? array())) {
+			return false;
+		}
+		WpStubs::$post_meta[ $id ][ $key ] = $meta_value;
+		return true;
+	}
+}
+if (!function_exists('wp_insert_attachment')) {
+	function wp_insert_attachment($attachment, $file = false, $parent_post_id = 0, $wp_error = false) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		$id = count(WpStubs::$posts) + 1000;
+		WpStubs::$posts[ $id ] = (object) array_merge((array) $attachment, array('ID' => $id, 'post_type' => 'attachment'));
+		return $id;
 	}
 }
 if (!function_exists('delete_post_meta')) {
@@ -151,6 +197,24 @@ if (!function_exists('delete_post_meta')) {
 if (!function_exists('is_multisite')) {
 	function is_multisite() {
 		return WpStubs::$is_multisite;
+	}
+}
+if (!function_exists('get_sites')) {
+	function get_sites($args = array()) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		return WpStubs::$site_ids;
+	}
+}
+if (!function_exists('switch_to_blog')) {
+	function switch_to_blog($blog_id) {
+		WpStubs::$blog_stack[] = WpStubs::$current_blog_id;
+		WpStubs::$current_blog_id = (int) $blog_id;
+		return true;
+	}
+}
+if (!function_exists('restore_current_blog')) {
+	function restore_current_blog() {
+		WpStubs::$current_blog_id = array_pop(WpStubs::$blog_stack) ?? 1;
+		return true;
 	}
 }
 if (!function_exists('get_site_option')) {
@@ -243,6 +307,11 @@ if (!function_exists('wp_generate_password')) {
 		return substr(bin2hex(random_bytes((int) max(1, $length))), 0, (int) $length);
 	}
 }
+if (!function_exists('wp_generate_uuid4')) {
+	function wp_generate_uuid4() {
+		return sprintf('%04x%04x-%04x-4%03x-%04x-%04x%04x%04x', random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0x0fff), random_int(0, 0x3fff) | 0x8000, random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0xffff));
+	}
+}
 if (!function_exists('is_wp_error')) {
 	function is_wp_error($thing) {
 		return is_object($thing) && method_exists($thing, 'get_error_message');
@@ -275,6 +344,11 @@ if (!function_exists('wp_remote_retrieve_response_code')) {
 		return $response['response']['code'] ?? '';
 	}
 }
+if (!function_exists('wp_json_encode')) {
+	function wp_json_encode($value) {
+		return json_encode($value);
+	}
+}
 if (!class_exists('WP_Error')) {
 	class WP_Error {
 		private string $code;
@@ -299,23 +373,39 @@ if (!class_exists('WP_Error')) {
 		public function get_error_data() {
 			return $this->data;
 		}
+
+		/** @param array<string,mixed>|mixed $data */
+		public function add_data( $data, string $code = '' ): void {
+			unset( $code );
+			$this->data = is_array( $data ) ? $data : array( $data );
+		}
 	}
 }
 if (!function_exists('wp_next_scheduled')) {
 	function wp_next_scheduled($hook, $args = array()) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
-		return WpStubs::$scheduled_hooks[ (string) $hook ] ?? false;
+		$hooks = WpStubs::$scheduled_hooks_by_blog[ WpStubs::$current_blog_id ] ?? WpStubs::$scheduled_hooks;
+		return $hooks[ (string) $hook ] ?? false;
 	}
 }
 if (!function_exists('wp_schedule_single_event')) {
 	function wp_schedule_single_event($timestamp, $hook, $args = array(), $wp_error = false) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
-		WpStubs::$scheduled_hooks[ (string) $hook ] = (int) $timestamp;
+		WpStubs::$scheduled_hooks_by_blog[ WpStubs::$current_blog_id ][ (string) $hook ] = (int) $timestamp;
+		if ( WpStubs::$current_blog_id === 1 ) WpStubs::$scheduled_hooks[ (string) $hook ] = (int) $timestamp;
 		return true;
 	}
 }
 if (!function_exists('wp_schedule_event')) {
 	function wp_schedule_event($timestamp, $recurrence, $hook, $args = array(), $wp_error = false) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
-		WpStubs::$scheduled_hooks[ (string) $hook ] = (int) $timestamp;
+		WpStubs::$scheduled_hooks_by_blog[ WpStubs::$current_blog_id ][ (string) $hook ] = (int) $timestamp;
+		if ( WpStubs::$current_blog_id === 1 ) WpStubs::$scheduled_hooks[ (string) $hook ] = (int) $timestamp;
 		return true;
+	}
+}
+if (!function_exists('wp_clear_scheduled_hook')) {
+	function wp_clear_scheduled_hook($hook, $args = array(), $wp_error = false) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		unset(WpStubs::$scheduled_hooks_by_blog[ WpStubs::$current_blog_id ][ (string) $hook ]);
+		if ( WpStubs::$current_blog_id === 1 ) unset(WpStubs::$scheduled_hooks[ (string) $hook ]);
+		return 1;
 	}
 }
 if (!function_exists('spawn_cron')) {

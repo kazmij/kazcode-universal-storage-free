@@ -13,17 +13,15 @@ defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Attachment\AttachmentFileResolver;
 use Kazcode\WpStorage\Domain\ManifestBuilder;
-use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\Queue\JobHandlerInterface;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
-use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
 use Kazcode\WpStorage\Plugin;
 use Kazcode\WpStorage\Services\CleanupLocalFiles;
-use Kazcode\WpStorage\Services\LegacyProfileMigrator;
 
 /**
- * Only deletes locals when every object row is present and verified.
+ * Re-derives the manifest from persisted metadata and lets CleanupEligibility
+ * decide; each variant is checked on its recorded profile/key (#53).
  */
 final class CleanupLocalFilesJobHandler implements JobHandlerInterface {
 
@@ -32,7 +30,7 @@ final class CleanupLocalFilesJobHandler implements JobHandlerInterface {
 	}
 
 	/**
-	 * @param array<string, mixed> $payload attachment_id (required), delete_local?, profile_prefix?
+	 * @param array<string, mixed> $payload attachment_id (required), delete_local?, profile_id?
 	 */
 	public function handle( array $payload ): array {
 		$attachment_id = (int) ( $payload['attachment_id'] ?? 0 );
@@ -43,22 +41,11 @@ final class CleanupLocalFilesJobHandler implements JobHandlerInterface {
 			);
 		}
 
-		$objects = new ObjectRepository();
-		$rows    = $objects->find_by_attachment( $attachment_id );
-		if ( $rows === array() ) {
+		if ( ( new ObjectRepository() )->find_by_attachment( $attachment_id ) === array() ) {
 			return array(
 				'success' => false,
 				'message' => 'No object rows for attachment.',
 			);
-		}
-
-		foreach ( $rows as $row ) {
-			if ( ( $row['remote_status'] ?? '' ) !== ObjectRemoteStatus::PRESENT || empty( $row['verified_at'] ) ) {
-				return array(
-					'success' => false,
-					'message' => 'Cleanup skipped: attachment not fully verified.',
-				);
-			}
 		}
 
 		$plugin   = Plugin::instance();
@@ -72,29 +59,21 @@ final class CleanupLocalFilesJobHandler implements JobHandlerInterface {
 			);
 		}
 
-		$prefix = isset( $payload['profile_prefix'] ) ? (string) $payload['profile_prefix'] : $this->resolve_prefix( $plugin );
-		$delete = array_key_exists( 'delete_local', $payload ) ? (bool) $payload['delete_local'] : null;
+		$delete     = array_key_exists( 'delete_local', $payload ) && $payload['delete_local'] !== null ? (bool) $payload['delete_local'] : null;
+		$profile_id = isset( $payload['profile_id'] ) && (int) $payload['profile_id'] > 0 ? (int) $payload['profile_id'] : null;
 
 		$result = ( new CleanupLocalFiles( $plugin->settings(), $plugin->storage() ) )->maybe_cleanup(
 			$attachment_id,
 			$local,
 			$manifest->items(),
 			$delete,
-			$prefix !== '' ? $prefix : null
+			$profile_id
 		);
 
+		// A blocked cleanup is a safe, final outcome — files stay local; not a retryable job failure.
 		return array(
-			'success' => ! $result['skipped'] || $result['deleted'] === 0,
+			'success' => true,
 			'message' => (string) ( $result['message'] ?? '' ),
 		);
-	}
-
-	private function resolve_prefix( Plugin $plugin ): string {
-		$repo    = new WpdbStorageProfileRepository();
-		$profile = $repo->find_default_upload_target();
-		if ( $profile === null ) {
-			$profile = ( new LegacyProfileMigrator( $plugin->settings(), $repo ) )->ensure_legacy_profile();
-		}
-		return $profile !== null ? (string) $profile->prefix : (string) $plugin->settings()->get( 'object_prefix', '' );
 	}
 }

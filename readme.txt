@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: 1.1.2
+Stable tag: 1.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -26,7 +26,7 @@ Reliability is built into the workflow: remote files are verified before destruc
 * Use resumable multipart transfers for large files.
 * Verify remote files before local cleanup.
 * Review health, logs, and media status in wp-admin.
-* Import/adopt supported WP Offload Media and Advanced Media Offloader records.
+* Import/adopt supported WP Offload Media, Advanced Media Offloader, and Media Cloud records.
 * Use supported admin, WP-CLI, and REST workflows.
 * Configure one primary storage profile.
 
@@ -36,7 +36,7 @@ Free supports Amazon S3, Cloudflare R2, DigitalOcean Spaces, Wasabi, Backblaze B
 
 = Import from another offload plugin =
 
-Already using WP Offload Media or Advanced Media Offloader? KAZCODE can read supported offload data without copying credentials, deleting competitor records, or changing bucket files. Verify imported media before disabling the old plugin.
+Already using WP Offload Media, Advanced Media Offloader, or Media Cloud? KAZCODE can read supported offload data without copying credentials, deleting competitor records, or changing bucket files. Verify imported media before disabling the old plugin.
 
 = Moving between storage providers =
 
@@ -69,7 +69,7 @@ For an existing site, configure and test storage first, then process attachments
 
 = Already using another offload plugin? =
 
-Use the WP Offload Media or Advanced Media Offloader importer. It reads supported records, builds KAZCODE inventory, and leaves source data and credentials untouched. Verify before disabling the old plugin: [WP Offload Media](https://kazcode.net/universal-storage/docs/guides/import-wp-offload-media/) or [Advanced Media Offloader](https://kazcode.net/universal-storage/docs/guides/import-advanced-media-offloader/).
+Use the WP Offload Media, Advanced Media Offloader, or Media Cloud importer. It reads supported records, builds KAZCODE inventory, and leaves source data and credentials untouched. Verify before disabling the old plugin: [WP Offload Media](https://kazcode.net/universal-storage/docs/guides/import-wp-offload-media/) or [Advanced Media Offloader](https://kazcode.net/universal-storage/docs/guides/import-advanced-media-offloader/). Media Cloud adoption requires retained `s3.key` metadata on S3-compatible drivers (GCS-native / Imgix-only layouts are skipped with a clear message).
 
 = Moving from one storage provider to another =
 
@@ -143,6 +143,12 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 
 == Changelog ==
 
+= 1.2.0 =
+* Added Integrity Center tools to verify, repair, reconcile, and safely rebuild storage inventory.
+* Added Safe Mode protection for staging and cloned sites that share storage prefixes.
+* Strengthened cloud-only cleanup, restore, delivery, and Media Library reliability.
+* Improved credential redaction and recovery tools while preserving existing settings and media inventory.
+
 = 1.1.2 =
 * Fixed Pro storage profile setup so additional profiles can use their own provider credentials.
 * Added per-profile connection testing for multi-provider setups.
@@ -165,6 +171,9 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 * Improved long object-key identity and database upgrade safety.
 
 == Upgrade Notice ==
+
+= 1.2.0 =
+Adds Integrity Center, Safe Mode, and safer cleanup and recovery tools. The database schema is updated while existing settings, storage profiles, and media inventory are preserved.
 
 = 1.1.2 =
 Fixes Pro multi-profile setup for cross-provider storage credentials. Existing site-wide credentials, profiles, media inventory, and schema are preserved.

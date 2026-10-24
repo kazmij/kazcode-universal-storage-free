@@ -327,13 +327,15 @@ final class MigrationService {
 	/**
 	 * Restore batch from S3.
 	 *
-	 * @param int      $batch_size Batch size.
-	 * @param int|null $attachment_id Single ID.
-	 * @param int      $after_id Cursor.
+	 * @param int      $batch_size            Batch size.
+	 * @param int|null $attachment_id         Single ID.
+	 * @param int      $after_id              Cursor.
+	 * @param bool     $acknowledge_warning   Allow WARNING preflight outcomes to proceed.
 	 * @return array{processed:int,success:int,failed:int,next_after_id:int,results:list<array<string,mixed>>}
 	 */
-	public function restore_batch(int $batch_size = 100, ?int $attachment_id = null, int $after_id = 0): array {
+	public function restore_batch(int $batch_size = 100, ?int $attachment_id = null, int $after_id = 0, bool $acknowledge_warning = false): array {
 		$restorer = Plugin::instance()->restorer();
+		$options  = $acknowledge_warning ? array( 'acknowledge_warning' => true ) : array();
 
 		if ($attachment_id !== null && $attachment_id > 0) {
 			$ids = array($attachment_id);
@@ -367,7 +369,7 @@ final class MigrationService {
 		$failed  = 0;
 		$results = array();
 		foreach ($ids as $id) {
-			$r                  = $restorer->restore($id);
+			$r                  = $restorer->restore($id, $options);
 			$r['attachment_id'] = $id;
 			$results[]          = $r;
 			if (!empty($r['success'])) {

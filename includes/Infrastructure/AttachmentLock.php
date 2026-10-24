@@ -71,8 +71,9 @@ final class AttachmentLock {
 		return null;
 	}
 
-	public function renew( AttachmentLeaseHandle $lease ): bool {
+	public function renew( AttachmentLeaseHandle $lease, ?int $ttl_seconds = null ): bool {
 		$key = $this->option_key( $lease->attachment_id );
+		$ttl = $ttl_seconds !== null ? max( 60, $ttl_seconds ) : self::TTL_SECONDS;
 
 		for ( $attempt = 0; $attempt < 3; ++$attempt ) {
 			$raw   = $this->read_option_value( $key );
@@ -83,7 +84,7 @@ final class AttachmentLock {
 			}
 
 			$new_state               = $state['raw'];
-			$new_state['expires']    = $now + self::TTL_SECONDS;
+			$new_state['expires']    = $now + $ttl;
 			$new_state['renewed_at'] = $now;
 
 			if ( $this->cas_update( $key, $raw, $new_state ) ) {

@@ -14,6 +14,8 @@ namespace {
 			public static array $lines = array();
 			/** @var list<string> */
 			public static array $successes = array();
+			/** @var list<string> */
+			public static array $warnings = array();
 
 			public static function line( string $message = '' ): void {
 				self::$lines[] = $message;
@@ -25,6 +27,10 @@ namespace {
 
 			public static function success( string $message = '' ): void {
 				self::$successes[] = $message;
+			}
+
+			public static function warning( string $message = '' ): void {
+				self::$warnings[] = $message;
 			}
 
 			public static function error( string $message = '' ): void {

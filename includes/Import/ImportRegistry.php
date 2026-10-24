@@ -36,6 +36,7 @@ final class ImportRegistry {
 			array(
 				new WpOffloadMediaImporter(),
 				new AdvancedMediaOffloaderImporter(),
+				new MediaCloudImporter(),
 			)
 		);
 	}
@@ -47,5 +48,23 @@ final class ImportRegistry {
 	/** @return array<string, ImporterInterface> */
 	public function all(): array {
 		return $this->importers;
+	}
+
+	/**
+	 * Retained exact-key descriptors across all registered importers.
+	 *
+	 * @return list<ImportedObjectDescriptor>
+	 */
+	public function descriptors_for_attachment( int $attachment_id ): array {
+		if ( $attachment_id <= 0 ) {
+			return array();
+		}
+		$out = array();
+		foreach ( $this->importers as $importer ) {
+			foreach ( $importer->descriptors_for_attachment( $attachment_id ) as $descriptor ) {
+				$out[] = $descriptor;
+			}
+		}
+		return $out;
 	}
 }

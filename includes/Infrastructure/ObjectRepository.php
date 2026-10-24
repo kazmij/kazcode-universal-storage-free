@@ -95,8 +95,7 @@ final class ObjectRepository {
 				continue;
 			}
 			$insert_columns[] = $column;
-			$placeholders[]   = in_array( $column, $integer_columns, true ) && $data[ $column ] !== null ? '%d' : '%s';
-			$values[]         = $data[ $column ];
+			$this->append_sql_placeholder( $column, $data[ $column ], $integer_columns, $placeholders, $values );
 		}
 
 		$update_columns = array_values(
@@ -119,8 +118,10 @@ final class ObjectRepository {
 			implode( ', ', $updates )
 		);
 
-		// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- SQL is assembled from a fixed column allowlist above; all values are placeholders.
-		$result = $wpdb->query( $wpdb->prepare( $sql, ...$values ) );
+		// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- SQL is assembled from a fixed column allowlist above; nulls are literal NULL, other values are placeholders.
+		$result = $values === array()
+			? $wpdb->query( $sql )
+			: $wpdb->query( $wpdb->prepare( $sql, ...$values ) );
 		if ( $result === false ) {
 			throw new \RuntimeException( 'Object upsert failed.' );
 		}
@@ -175,9 +176,298 @@ final class ObjectRepository {
 	 */
 	public function find_by_profile_and_key( int $storage_profile_id, string $object_key ): ?array {
 		global $wpdb;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock.
-		$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$this->table()} WHERE storage_profile_id = %d AND object_key = %s", $storage_profile_id, $object_key ), ARRAY_A );
-		return is_array( $row ) ? $row : null;
+		$hash = hash( 'sha256', $object_key );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock; lookup by SHA-256 hash so case-insensitive MySQL collations cannot conflate distinct S3 keys.
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->table()} WHERE storage_profile_id = %d AND object_key_hash = %s",
+				$storage_profile_id,
+				$hash
+			),
+			ARRAY_A
+		);
+		if ( ! is_array( $row ) ) {
+			return null;
+		}
+		// Exact binary key check — hash collision is vanishingly rare, but preserves case-sensitive S3 semantics.
+		if ( (string) ( $row['object_key'] ?? '' ) !== $object_key ) {
+			return null;
+		}
+		return $row;
+	}
+
+	/**
+	 * WordPress upload filenames are global to a site's uploads directory, while
+	 * object inventory is profile-scoped. A PRESENT row in any profile therefore
+	 * makes the relative path unavailable for a new Media Library upload.
+	 */
+	public function has_present_relative_path( string $relative_path ): bool {
+		if ( $relative_path === '' ) {
+			return false;
+		}
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- fixed plugin-owned inventory table.
+		$row = $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM {$this->table()} WHERE BINARY local_relative_path = BINARY %s AND remote_status = %s LIMIT 1", $relative_path, ObjectRemoteStatus::PRESENT ) );
+		return (bool) $row;
+	}
+
+	/**
+	 * A Direct Upload path is unavailable when any existing writer owns it,
+	 * whether that ownership is represented by local bytes, WordPress metadata,
+	 * or an inventory row that has not reached remote PRESENT state.
+	 */
+	public function has_owned_relative_path( string $relative_path ): bool {
+		if ( $relative_path === '' || str_starts_with( $relative_path, '/' ) || str_contains( $relative_path, "\0" ) || preg_match( '#(^|/)\.\.?(/|$)#', $relative_path ) ) {
+			return true;
+		}
+
+		if ( function_exists( 'wp_upload_dir' ) ) {
+			$uploads = wp_upload_dir();
+			$basedir = rtrim( (string) ( $uploads['basedir'] ?? '' ), '/\\' );
+			if ( $basedir !== '' && is_file( $basedir . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative_path ) ) ) {
+				return true;
+			}
+		}
+
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- exact ownership lookup across plugin inventory.
+		$wpdb->last_error = '';
+		$inventory = $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM {$this->table()} WHERE BINARY local_relative_path = BINARY %s LIMIT 1", $relative_path ) );
+		if ( $wpdb->last_error !== '' ) {
+			// An indeterminate owner must reserve the path: accepting it could create
+			// duplicate _wp_attached_file identities during Direct Upload creation.
+			return true;
+		}
+		if ( $inventory ) {
+			return true;
+		}
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- exact ownership lookup across WordPress attachment metadata.
+		$wpdb->last_error = '';
+		$attachment = $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM {$wpdb->postmeta} AS pm INNER JOIN {$wpdb->posts} AS p ON p.ID = pm.post_id WHERE pm.meta_key = %s AND BINARY pm.meta_value = BINARY %s AND p.post_type = %s LIMIT 1", '_wp_attached_file', $relative_path, 'attachment' ) );
+		if ( $wpdb->last_error !== '' ) {
+			return true;
+		}
+		return (bool) $attachment;
+	}
+
+	/**
+	 * Atomic owner-preserving insert/update for profile+key.
+	 *
+	 * Never rewrites an existing row's attachment_id or local_relative_path to a
+	 * different owner/path (even under concurrent duplicate-key races). Uses a
+	 * single INSERT … ON DUPLICATE KEY UPDATE that only mutates non-ownership
+	 * columns when the stored owner+relative already match VALUES().
+	 *
+	 * @param array<string, mixed> $data Row fields (must include attachment_id, storage_profile_id, object_key, local_relative_path).
+	 * @return array{ok:bool,id?:int,reason?:string,existing?:array<string,mixed>}
+	 */
+	public function insert_owned_or_conflict( array $data ): array {
+		global $wpdb;
+
+		$profile_id = (int) ( $data['storage_profile_id'] ?? 0 );
+		$key        = (string) ( $data['object_key'] ?? '' );
+		$attachment = (int) ( $data['attachment_id'] ?? 0 );
+		$relative   = (string) ( $data['local_relative_path'] ?? '' );
+		if ( $profile_id <= 0 || $key === '' || $attachment <= 0 ) {
+			return array(
+				'ok'     => false,
+				'reason' => 'invalid_row',
+			);
+		}
+
+		$now = gmdate( 'Y-m-d H:i:s' );
+		$data['updated_at'] = $now;
+		if ( empty( $data['created_at'] ) ) {
+			$data['created_at'] = $now;
+		}
+		$data['object_key_hash'] = hash( 'sha256', $key );
+
+		$columns = array(
+			'attachment_id',
+			'storage_profile_id',
+			'local_relative_path',
+			'object_key',
+			'object_key_hash',
+			'variant_type',
+			'mime_type',
+			'size_bytes',
+			'etag',
+			'checksum',
+			'local_status',
+			'remote_status',
+			'attempt_count',
+			'last_error_code',
+			'last_error_message',
+			'offloaded_at',
+			'verified_at',
+			'created_at',
+			'updated_at',
+		);
+		$integer_columns = array( 'attachment_id', 'storage_profile_id', 'size_bytes', 'attempt_count' );
+		$insert_columns  = array();
+		$placeholders    = array();
+		$values          = array();
+		foreach ( $columns as $column ) {
+			if ( ! array_key_exists( $column, $data ) ) {
+				continue;
+			}
+			$insert_columns[] = $column;
+			$this->append_sql_placeholder( $column, $data[ $column ], $integer_columns, $placeholders, $values );
+		}
+
+		$owner_match = 'attachment_id = VALUES(attachment_id) AND BINARY local_relative_path = BINARY VALUES(local_relative_path)';
+		$reclaimable = "remote_status IN ('stale','deleted')";
+		$may_write   = "({$owner_match}) OR ({$reclaimable})";
+		$mutable     = array_values(
+			array_diff(
+				$insert_columns,
+				array(
+					'created_at',
+					'storage_profile_id',
+					'object_key',
+					'object_key_hash',
+					'attachment_id',
+					'local_relative_path',
+				)
+			)
+		);
+		$updates = array();
+		// Ownership first — MySQL evaluates ODKU left-to-right; reclaimability must
+		// read the original remote_status before mutable fields rewrite it.
+		$updates[] = "attachment_id = IF({$reclaimable} OR ({$owner_match}), VALUES(attachment_id), attachment_id)";
+		$updates[] = "local_relative_path = IF({$reclaimable} OR ({$owner_match}), VALUES(local_relative_path), local_relative_path)";
+		foreach ( $mutable as $column ) {
+			$updates[] = "{$column} = IF({$may_write}, VALUES({$column}), {$column})";
+		}
+		$updates[] = 'id = LAST_INSERT_ID(id)';
+
+		$sql = sprintf(
+			'INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
+			$this->table(),
+			implode( ', ', $insert_columns ),
+			implode( ', ', $placeholders ),
+			implode( ', ', $updates )
+		);
+
+		// Named lock serializes relative-key inserts even under READ COMMITTED
+		// (where gap locks from SELECT ... FOR UPDATE on empty sets are not kept).
+		$lock_name = 's3ms_rel_' . substr( hash( 'sha256', $profile_id . ':' . $attachment . ':' . $relative ), 0, 48 );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$got_lock = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 15)', $lock_name ) );
+		if ( $got_lock !== 1 ) {
+			return array(
+				'ok'     => false,
+				'reason' => 'write_failed',
+			);
+		}
+
+		try {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- owner-preserving write uses an explicit transaction.
+			$wpdb->query( 'START TRANSACTION' );
+
+			$relative_conflict = $this->locked_relative_key_conflict( $attachment, $profile_id, $relative, $key );
+			if ( $relative_conflict !== null ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->query( 'ROLLBACK' );
+				return array(
+					'ok'       => false,
+					'reason'   => 'relative_key_conflict',
+					'existing' => $relative_conflict,
+				);
+			}
+
+			// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- SQL is assembled from a fixed column allowlist; nulls are literal NULL, other values are placeholders.
+			$result = $values === array()
+				? $wpdb->query( $sql )
+				: $wpdb->query( $wpdb->prepare( $sql, ...$values ) );
+			if ( $result === false ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->query( 'ROLLBACK' );
+				return array(
+					'ok'     => false,
+					'reason' => 'write_failed',
+				);
+			}
+
+			$id = (int) $wpdb->insert_id;
+			if ( $id <= 0 ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->query( 'ROLLBACK' );
+				return array(
+					'ok'     => false,
+					'reason' => 'write_failed',
+				);
+			}
+
+			$row = $this->find_by_id( $id );
+			if ( ! is_array( $row ) ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->query( 'ROLLBACK' );
+				return array(
+					'ok'     => false,
+					'reason' => 'write_failed',
+				);
+			}
+
+			$same_owner = (int) ( $row['attachment_id'] ?? 0 ) === $attachment
+				&& (string) ( $row['local_relative_path'] ?? '' ) === $relative;
+			if ( ! $same_owner ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->query( 'ROLLBACK' );
+				$reason = (int) ( $row['attachment_id'] ?? 0 ) !== $attachment
+					? 'key_owned_by_other_attachment'
+					: 'key_owned_by_other_relative';
+				return array(
+					'ok'       => false,
+					'reason'   => $reason,
+					'existing' => $row,
+				);
+			}
+
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+			$wpdb->query( 'COMMIT' );
+
+			return array(
+				'ok' => true,
+				'id' => $id,
+			);
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+			$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock_name ) );
+		}
+	}
+
+	/**
+	 * Lock current (attachment, profile, relative) rows and detect a different object_key.
+	 *
+	 * @return array<string, mixed>|null Conflicting row, or null when clear.
+	 */
+	private function locked_relative_key_conflict( int $attachment_id, int $profile_id, string $relative, string $object_key ): ?array {
+		global $wpdb;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table; FOR UPDATE holds current relative bindings for the owner-preserving write.
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->table()} WHERE attachment_id = %d AND storage_profile_id = %d AND BINARY local_relative_path = BINARY %s AND remote_status NOT IN (%s, %s) FOR UPDATE",
+				$attachment_id,
+				$profile_id,
+				$relative,
+				ObjectRemoteStatus::STALE,
+				ObjectRemoteStatus::DELETED
+			),
+			ARRAY_A
+		);
+		if ( ! is_array( $rows ) ) {
+			return null;
+		}
+		foreach ( $rows as $row ) {
+			$existing_key = (string) ( $row['object_key'] ?? '' );
+			if ( $existing_key !== '' && $existing_key !== $object_key ) {
+				return $row;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -212,6 +502,19 @@ final class ObjectRepository {
 				array_map( 'strval', $rows )
 			)
 		);
+	}
+
+	/**
+	 * Distinct attachment ids that have inventory rows, cursor-paged by id.
+	 *
+	 * @return list<int>
+	 */
+	public function attachment_ids_page( int $limit = 50, int $after_attachment_id = 0 ): array {
+		global $wpdb;
+		$limit = max( 1, min( 500, $limit ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock; bounded cursor pagination for an admin-only diagnostic.
+		$ids = $wpdb->get_col( $wpdb->prepare( "SELECT DISTINCT attachment_id FROM {$this->table()} WHERE attachment_id > %d ORDER BY attachment_id ASC LIMIT %d", $after_attachment_id, $limit ) );
+		return is_array( $ids ) ? array_map( 'intval', $ids ) : array();
 	}
 
 	/**
@@ -314,6 +617,46 @@ final class ObjectRepository {
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin-owned table, see class docblock; $wpdb->delete() already parameterizes values.
 		$deleted = $wpdb->delete( $this->table(), array( 'attachment_id' => $attachment_id ), array( '%d' ) );
-		return is_int( $deleted ) ? $deleted : 0;
+		if ( ! is_int( $deleted ) ) {
+			throw new \RuntimeException( 'Object inventory cleanup failed.' );
+		}
+		return $deleted;
+	}
+
+	/** Remove one exact Direct Upload inventory row without touching sibling objects. */
+	public function delete_exact_attachment_profile_key( int $attachment_id, int $storage_profile_id, string $object_key ): int {
+		if ( $attachment_id < 1 || $storage_profile_id < 1 || $object_key === '' ) {
+			throw new \InvalidArgumentException( 'Exact inventory cleanup needs an attachment, profile, and object key.' );
+		}
+		global $wpdb;
+		$hash = hash( 'sha256', $object_key );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table and all values are prepared; BINARY preserves case-sensitive object-key identity.
+		$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM {$this->table()} WHERE attachment_id = %d AND storage_profile_id = %d AND object_key_hash = %s AND BINARY object_key = BINARY %s", $attachment_id, $storage_profile_id, $hash, $object_key ) );
+		if ( ! is_int( $deleted ) ) {
+			throw new \RuntimeException( 'Exact object inventory cleanup failed.' );
+		}
+		return $deleted;
+	}
+
+	/**
+	 * Bind a column value for prepared INSERT SQL. Null becomes literal NULL (clears on ODKU).
+	 *
+	 * @param list<string> $integer_columns Integer columns.
+	 * @param list<string> $placeholders    Placeholder accumulator.
+	 * @param list<mixed>  $values          Bound value accumulator.
+	 */
+	private function append_sql_placeholder(
+		string $column,
+		mixed $value,
+		array $integer_columns,
+		array &$placeholders,
+		array &$values
+	): void {
+		if ( $value === null ) {
+			$placeholders[] = 'NULL';
+			return;
+		}
+		$placeholders[] = in_array( $column, $integer_columns, true ) ? '%d' : '%s';
+		$values[]       = $value;
 	}
 }

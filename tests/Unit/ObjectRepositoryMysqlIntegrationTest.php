@@ -16,7 +16,22 @@ namespace {
 		function dbDelta( string $sql ): array {
 			global $wpdb;
 			$GLOBALS['s3ms_schema_sql'][] = $sql;
-			$wpdb->query( $sql );
+			if ( ! $wpdb instanceof \Kazcode\WpStorage\Tests\MysqliWpdbFake ) {
+				$wpdb->query( $sql );
+				return array();
+			}
+			$table_sql = preg_replace( '/\\ACREATE TABLE\\s+/i', 'CREATE TABLE IF NOT EXISTS ', $sql, 1 ) ?? $sql;
+			$wpdb->query( $table_sql );
+			if (
+				str_contains( $sql, 'rejected bigint' )
+				&& preg_match( '/\\ACREATE TABLE\\s+([^\\s(]+)/i', $sql, $matches ) === 1
+			) {
+				$table    = $matches[1];
+				$rejected = $wpdb->get_var( "SHOW COLUMNS FROM {$table} LIKE 'rejected'" );
+				if ( ! $rejected ) {
+					$wpdb->query( "ALTER TABLE {$table} ADD rejected bigint(20) unsigned NOT NULL DEFAULT 0" );
+				}
+			}
 			return array();
 		}
 	}
@@ -25,6 +40,9 @@ namespace {
 namespace Kazcode\WpStorage\Tests {
 
 	use Kazcode\WpStorage\Infrastructure\ObjectRepository;
+	use Kazcode\WpStorage\Infrastructure\ReservationRepository;
+	use Kazcode\WpStorage\Infrastructure\ReservationCleanupRepository;
+	use Kazcode\WpStorage\Infrastructure\DirectUploadFinalizationIntentRepository;
 	use Kazcode\WpStorage\Infrastructure\SchemaMigrator;
 	use Kazcode\WpStorage\Tests\Support\WpStubs;
 	use PHPUnit\Framework\TestCase;
@@ -39,7 +57,11 @@ namespace Kazcode\WpStorage\Tests {
 			parent::setUp();
 			WpStubs::reset();
 			$this->previous_wpdb = $GLOBALS['wpdb'] ?? null;
-			$this->db            = @new \mysqli( 'db', 'root', 'root', 'wp_71_php84' );
+			try {
+				$this->db = @new \mysqli( 'db', 'root', 'root', 'wp_71_php84' );
+			} catch ( \mysqli_sql_exception $e ) {
+				$this->markTestSkipped( 'MariaDB test database is not available: ' . $e->getMessage() );
+			}
 			if ( $this->db->connect_errno ) {
 				$this->markTestSkipped( 'MariaDB test database is not available: ' . $this->db->connect_error );
 			}
@@ -51,8 +73,17 @@ namespace Kazcode\WpStorage\Tests {
 
 		protected function tearDown(): void {
 			if ( $this->db instanceof \mysqli ) {
-				$table = $this->prefix . 's3ms_objects';
+				foreach ( array( 's3ms_reservation_cleanup', 's3ms_du_finalization_intents', 's3ms_direct_upload_migration_fences' ) as $suffix ) {
+					$this->db->query( "DROP TABLE IF EXISTS `{$this->prefix}{$suffix}`" );
+				}
+				$table = $this->prefix . 's3ms_import_runs';
 				$this->db->query( "DROP TABLE IF EXISTS `{$table}`" );
+				$table = $this->prefix . 's3ms_transfer_sessions';
+				$this->db->query( "DROP TABLE IF EXISTS `{$table}`" );
+			$table = $this->prefix . 's3ms_objects';
+			$this->db->query( "DROP TABLE IF EXISTS `{$table}`" );
+			$table = $this->prefix . 's3ms_storage_reservations';
+			$this->db->query( "DROP TABLE IF EXISTS `{$table}`" );
 				$table = $this->prefix . 's3ms_storage_profiles';
 				$this->db->query( "DROP TABLE IF EXISTS `{$table}`" );
 				$this->db->close();
@@ -78,6 +109,43 @@ namespace Kazcode\WpStorage\Tests {
 			$this->assertGreaterThan( 0, $id_b );
 			$this->assertNotSame( $id_a, $id_b );
 			$this->assertSame( 2, $repo->total_count() );
+		}
+
+		public function test_finalization_intent_and_cleanup_settle_atomically_without_touching_an_unrelated_marker(): void {
+			( new SchemaMigrator() )->maybe_upgrade();
+			$binding = array( 'version' => 1, 'attachment_id' => 999, 'blog_id' => 1, 'owner_uuid' => 'session-999', 'path_reservation_id' => 991, 'key_reservation_id' => 992, 'relative_path' => '2026/10/archive.zip', 'profile_id' => 9, 'object_key' => 'private/direct-upload/session-999/archive.zip', 'profile_fingerprint' => 'fingerprint-999' );
+			$intent_binding = array_merge( $binding, array( 'direct_upload_session_uuid' => 'session-999', 'direct_upload_attempt_uuid' => 'attempt-999', 'direct_upload_attempt_generation' => 1, 'direct_upload_profile_fingerprint' => 'fingerprint-999' ) );
+			unset( $intent_binding['attachment_id'], $intent_binding['profile_fingerprint'] );
+			$location = array( 'version' => 2, 'profile_id' => 9, 'object_key' => 'private/direct-upload/session-999/archive.zip', 'relative_path' => '2026/10/archive.zip', 'location_fingerprint' => 'fingerprint-999' );
+			$intents = new DirectUploadFinalizationIntentRepository();
+			$intent_binding_json = wp_json_encode( $intent_binding );
+			$intent_location_json = wp_json_encode( $location );
+			foreach ( array( 'marker-999', 'unrelated-marker' ) as $marker ) {
+				$this->assertNotFalse( $this->db->query( "INSERT INTO `{$this->prefix}s3ms_du_finalization_intents` (recovery_marker, binding_json, location_json, created_at, updated_at) VALUES ('{$marker}', '" . $this->db->real_escape_string( (string) $intent_binding_json ) . "', '" . $this->db->real_escape_string( (string) $intent_location_json ) . "', UTC_TIMESTAMP(), UTC_TIMESTAMP())" ) );
+			}
+			$binding = array_merge( $intent_binding, array( 'attachment_id' => 999, 'profile_fingerprint' => 'fingerprint-999', 'direct_upload_finalization_marker' => 'marker-999', 'direct_upload_finalization_intent_binding' => $intent_binding_json, 'direct_upload_finalization_intent_location' => $intent_location_json ) );
+			$cleanup = ( new ReservationCleanupRepository() )->record( $binding, 'attachment_deleted:999' );
+			$this->assertIsArray( $cleanup );
+			$this->assertTrue( ( new ReservationCleanupRepository() )->complete_with_finalization_intent( (int) $cleanup['id'], $binding, 'attachment_deleted:999' ) );
+			$this->assertNull( $intents->find( 'marker-999' ) );
+			$this->assertNotNull( $intents->find( 'unrelated-marker' ) );
+			$this->assertSame( 0, (int) $this->db->query( "SELECT COUNT(*) FROM `{$this->prefix}s3ms_reservation_cleanup`" )->fetch_row()[0] );
+		}
+
+		public function test_strict_mysql_reports_an_overlong_reservation_path_as_a_write_failure_not_a_collision(): void {
+			$this->db->query( "SET SESSION sql_mode = 'STRICT_ALL_TABLES'" );
+			( new SchemaMigrator() )->maybe_upgrade();
+
+			$result = ( new ReservationRepository() )->acquire(
+				array(
+					'blog_id'       => 1,
+					'owner_uuid'    => '22222222-2222-4222-8222-222222222222',
+					'relative_path' => str_repeat( 'x', 513 ),
+				)
+			);
+
+			$this->assertTrue( is_wp_error( $result ) );
+			$this->assertSame( 'reservation_write_failed', $result->get_error_code() );
 		}
 
 		public function test_keys_that_differ_before_191_characters_still_coexist(): void {
@@ -164,7 +232,7 @@ namespace Kazcode\WpStorage\Tests {
 			( new SchemaMigrator() )->maybe_upgrade();
 			( new SchemaMigrator() )->maybe_upgrade();
 
-			$this->assertSame( 3, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
+			$this->assertSame( SchemaMigrator::VERSION, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
 			$this->assertTrue( $this->index_exists( 'profile_object_key_hash' ) );
 			$this->assertFalse( $this->index_exists( 'profile_object_key' ) );
 			$this->assertSame( hash( 'sha256', $prefix . '/a.jpg' ), (string) $GLOBALS['wpdb']->get_var( "SELECT object_key_hash FROM {$this->prefix}s3ms_objects LIMIT 1" ) );
@@ -241,7 +309,7 @@ namespace Kazcode\WpStorage\Tests {
 
 			( new SchemaMigrator() )->maybe_upgrade();
 
-			$this->assertSame( 3, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
+			$this->assertSame( SchemaMigrator::VERSION, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
 			$this->assertTrue( $this->table_exists( 's3ms_transfer_sessions' ) );
 			$this->assertTrue( $this->table_exists( 's3ms_import_runs' ) );
 			$this->assertTrue( $this->index_exists( 'profile_object_key_hash' ) );
@@ -388,7 +456,7 @@ namespace Kazcode\WpStorage\Tests {
 			( new SchemaMigrator() )->maybe_upgrade();
 			( new SchemaMigrator() )->maybe_upgrade();
 
-			$this->assertSame( 3, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
+			$this->assertSame( SchemaMigrator::VERSION, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
 			$this->assertTrue( $this->column_exists( 'object_key_hash' ) );
 			$this->assertTrue( $this->index_exists( 'profile_object_key_hash' ) );
 			$this->assertFalse( $this->index_exists( 'profile_object_key' ) );
@@ -552,6 +620,7 @@ PHP;
 	final class MysqliWpdbFake {
 		public int $insert_id = 0;
 		public string $last_error = '';
+		public int $last_errno = 0;
 
 		public function __construct(
 			private \mysqli $db,
@@ -574,10 +643,36 @@ PHP;
 			$result = $this->db->query( $query );
 			if ( $result === false ) {
 				$this->last_error = $this->db->error;
+				$this->last_errno = $this->db->errno;
 				return false;
 			}
 			$this->insert_id = (int) $this->db->insert_id;
 			return $result === true ? $this->db->affected_rows : 0;
+		}
+
+		public function insert( string $table, array $data ): bool {
+			$columns = array_map( static fn( string $column ): string => "`{$column}`", array_keys( $data ) );
+			$values = array_map( fn( $value ): string => $value === null ? 'NULL' : "'" . $this->db->real_escape_string( (string) $value ) . "'", array_values( $data ) );
+			try {
+				$result = $this->db->query( 'INSERT INTO ' . $table . ' (' . implode( ', ', $columns ) . ') VALUES (' . implode( ', ', $values ) . ')' );
+			} catch ( \mysqli_sql_exception $error ) {
+				$this->last_error = $error->getMessage();
+				$this->last_errno = $error->getCode();
+				return false;
+			}
+			if ( $result === false ) {
+				$this->last_error = $this->db->error;
+				$this->last_errno = $this->db->errno;
+				return false;
+			}
+			$this->insert_id = (int) $this->db->insert_id;
+			return true;
+		}
+
+		public function delete( string $table, array $where, array $format = array() ): int|false { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+			$clauses = array();
+			foreach ( $where as $column => $value ) $clauses[] = "`{$column}` = " . (int) $value;
+			return $this->query( "DELETE FROM {$table} WHERE " . implode( ' AND ', $clauses ) );
 		}
 
 		public function get_var( string $query ): mixed {

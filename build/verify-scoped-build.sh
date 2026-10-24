@@ -80,4 +80,13 @@ if [[ -f "${ROOT}/vendor/aws/aws-crt-php/format-check.py" ]]; then
 	fail "vendor/aws/aws-crt-php/format-check.py must not ship in release ZIP"
 fi
 
+# Plugin code only probes WordPress/global functions. A prefixed literal such as
+# function_exists('Kazcode\WpStorage\Vendor\wp_upload_dir') is always false and
+# silently disables the guarded feature in the release ZIP (see scoper.inc.php).
+SCOPED_FUNCTION_CHECKS="$(grep -rnoE "(function_exists|is_callable)\(\s*['\"]\\\\?Kazcode\\\\+WpStorage\\\\+Vendor\\\\+[A-Za-z_][A-Za-z0-9_]*['\"]" "${ROOT}/includes" 2>/dev/null || true)"
+if [[ -n "${SCOPED_FUNCTION_CHECKS}" ]]; then
+	fail "plugin code probes prefixed global functions (always false in the release ZIP):
+${SCOPED_FUNCTION_CHECKS}"
+fi
+
 echo "OK: scoped release ZIP verified — ${ZIP}"

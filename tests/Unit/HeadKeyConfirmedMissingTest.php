@@ -66,7 +66,7 @@ final class HeadKeyConfirmedMissingTest extends TestCase {
 		$this->assertTrue( $head['confirmed_missing'] );
 	}
 
-	public function test_s3storage_head_key_confirmed_missing_on_http_404_status_with_generic_aws_code(): void {
+	public function test_s3storage_head_key_not_confirmed_missing_on_http_404_with_non_object_aws_code(): void {
 		$settings = $this->createMock( Settings::class );
 		$settings->method( 'get' )->willReturn( 'test-bucket' );
 		$settings->method( 'is_aws_configured' )->willReturn( true );
@@ -88,7 +88,34 @@ final class HeadKeyConfirmedMissingTest extends TestCase {
 		$head = $this->storageWithClient( $settings, $client )->head_key( 'uploads/missing.jpg' );
 
 		$this->assertFalse( $head['exists'] );
-		$this->assertTrue( $head['confirmed_missing'] );
+		$this->assertFalse( $head['confirmed_missing'] );
+	}
+
+	public function test_s3storage_head_key_not_confirmed_missing_on_no_such_bucket(): void {
+		$settings = $this->createMock( Settings::class );
+		$settings->method( 'get' )->willReturn( 'test-bucket' );
+		$settings->method( 'is_aws_configured' )->willReturn( true );
+
+		$client = new class() {
+			public function headObject( array $args ): never {
+				throw new class( 'The specified bucket does not exist' ) extends \Exception {
+					public function getAwsErrorCode(): string {
+						return 'NoSuchBucket';
+					}
+
+					public function getStatusCode(): int {
+						return 404;
+					}
+				};
+			}
+		};
+
+		$head = $this->storageWithClient( $settings, $client )->head_key( 'uploads/missing.jpg' );
+
+		$this->assertFalse( $head['exists'] );
+		$this->assertFalse( $head['confirmed_missing'] );
+		$this->assertSame( 'NoSuchBucket', (string) ( $head['error_code'] ?? '' ) );
+		$this->assertSame( 404, (int) ( $head['status_code'] ?? 0 ) );
 	}
 
 	public function test_s3storage_head_key_not_confirmed_missing_on_transient_error(): void {
@@ -179,7 +206,7 @@ final class HeadKeyConfirmedMissingTest extends TestCase {
 		$this->assertTrue( $head['confirmed_missing'] );
 	}
 
-	public function test_profile_storage_gateway_head_key_confirmed_missing_on_http_404_status_with_generic_aws_code(): void {
+	public function test_profile_storage_gateway_head_key_not_confirmed_missing_on_http_404_with_non_object_aws_code(): void {
 		$settings = $this->createMock( Settings::class );
 		$profile  = $this->profile();
 
@@ -200,7 +227,33 @@ final class HeadKeyConfirmedMissingTest extends TestCase {
 		$head = $this->gatewayWithClient( $profile, $settings, $client )->head_key( 'uploads/missing.jpg' );
 
 		$this->assertFalse( $head['exists'] );
-		$this->assertTrue( $head['confirmed_missing'] );
+		$this->assertFalse( $head['confirmed_missing'] );
+	}
+
+	public function test_profile_storage_gateway_head_key_not_confirmed_missing_on_no_such_bucket(): void {
+		$settings = $this->createMock( Settings::class );
+		$profile  = $this->profile();
+
+		$client = new class() {
+			public function headObject( array $args ): never {
+				throw new class( 'The specified bucket does not exist' ) extends \Exception {
+					public function getAwsErrorCode(): string {
+						return 'NoSuchBucket';
+					}
+
+					public function getStatusCode(): int {
+						return 404;
+					}
+				};
+			}
+		};
+
+		$head = $this->gatewayWithClient( $profile, $settings, $client )->head_key( 'uploads/missing.jpg' );
+
+		$this->assertFalse( $head['exists'] );
+		$this->assertFalse( $head['confirmed_missing'] );
+		$this->assertSame( 'NoSuchBucket', (string) ( $head['error_code'] ?? '' ) );
+		$this->assertSame( 404, (int) ( $head['status_code'] ?? 0 ) );
 	}
 
 	public function test_profile_storage_gateway_head_key_not_confirmed_missing_on_access_denied(): void {

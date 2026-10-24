@@ -42,6 +42,88 @@ final class ObjectOffloadServiceTest extends TestCase {
 		$this->assertTrue( ObjectOffloadService::is_enabled() );
 	}
 
+	public function test_offload_refuses_to_steal_existing_owner_on_same_key(): void {
+		$files = array(
+			'2026/08/photo.jpg' => $this->touch_file( '2026/08/photo.jpg', 10 ),
+		);
+		WpStubs::set_meta( 20, '_wp_attached_file', '2026/08/photo.jpg' );
+		WpStubs::set_meta( 20, '_wp_attachment_metadata', array( 'file' => '2026/08/photo.jpg' ) );
+
+		$settings = $this->settings_map(
+			array(
+				'cache_control' => 'public, max-age=31536000',
+			)
+		);
+		$keys    = new S3KeyResolver( $this->settings_map( array( 'object_prefix' => 'uploads/' ) ) );
+		$storage = $this->createMock( S3Storage::class );
+		$storage->method( 'keys' )->willReturn( $keys );
+		$storage->method( 'head_key' )->willReturn( array( 'exists' => false ) );
+		$storage->method( 'content_type_for_local_file' )->willReturn( 'image/jpeg' );
+
+		$file_resolver = $this->getMockBuilder( AttachmentFileResolver::class )
+			->setConstructorArgs( array( $keys ) )
+			->onlyMethods( array( 'existing_local_files', 'relative_paths' ) )
+			->getMock();
+		$file_resolver->method( 'existing_local_files' )->willReturn( $files );
+		$file_resolver->method( 'relative_paths' )->willReturn( array_keys( $files ) );
+
+		$transfer = new ObjectOffloadTransferCallbackFake(
+			static function (): array {
+				return array(
+					'success'           => true,
+					'verified_complete' => true,
+					'session_uuid'      => 'unit-transfer',
+					'resumed'           => false,
+					'message'           => 'Destination verified.',
+				);
+			}
+		);
+
+		$profile = new StorageProfile(
+			1,
+			'uuid-test',
+			'Test Profile',
+			'aws',
+			'test-bucket',
+			'us-east-1',
+			'',
+			false,
+			'uploads/',
+			'storage',
+			'',
+			false,
+			'keys',
+			'legacy',
+			true,
+			false,
+			false,
+			gmdate( 'Y-m-d H:i:s' ),
+			gmdate( 'Y-m-d H:i:s' ),
+		);
+		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
+		$profiles->method( 'find_default_upload_target' )->willReturn( $profile );
+
+		$objects = $this->createMock( ObjectRepository::class );
+		$objects->method( 'insert_owned_or_conflict' )->willReturn(
+			array(
+				'ok'       => false,
+				'reason'   => 'key_owned_by_other_attachment',
+				'existing' => array( 'attachment_id' => 99 ),
+			)
+		);
+		$objects->method( 'find_by_attachment' )->willReturn( array() );
+		$objects->expects( $this->never() )->method( 'upsert' );
+
+		$service = new ObjectOffloadService( $settings, $storage, $file_resolver, null, $objects, $profiles, $transfer );
+
+		try {
+			$service->offload( 20, false );
+			$this->fail( 'Expected ownership conflict to fail offload.' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'owned by another attachment', $e->getMessage() );
+		}
+	}
+
 	public function test_full_offload_writes_object_rows_and_offloaded_meta(): void {
 		$files = array(
 			'2026/08/photo.jpg'         => $this->touch_file( '2026/08/photo.jpg' ),
@@ -257,6 +339,7 @@ final class ObjectOffloadServiceTest extends TestCase {
 		S3Storage $storage,
 		AttachmentFileResolver $file_resolver,
 		object $transfer,
+		array $seed_rows = array(),
 	): ObjectOffloadService {
 		$profile = new StorageProfile(
 			1,
@@ -283,18 +366,30 @@ final class ObjectOffloadServiceTest extends TestCase {
 		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
 		$profiles->method( 'find_default_upload_target' )->willReturn( $profile );
 
-		$rows   = array();
-		$next_id = 1;
+		$rows    = $seed_rows;
+		$next_id = count( $seed_rows ) + 1;
 		$objects = $this->createMock( ObjectRepository::class );
-		$objects->method( 'upsert' )->willReturnCallback(
-			static function ( array $data ) use ( &$rows, &$next_id ): int {
-				$key = (int) ( $data['storage_profile_id'] ?? 0 ) . ':' . (string) ( $data['object_key'] ?? '' );
-				if ( ! isset( $rows[ $key ] ) ) {
-					$rows[ $key ] = array_merge( $data, array( 'id' => $next_id++ ) );
-				} else {
-					$rows[ $key ] = array_merge( $rows[ $key ], $data );
+		$objects->method( 'insert_owned_or_conflict' )->willReturnCallback(
+			static function ( array $data ) use ( &$rows, &$next_id ): array {
+				$key        = (int) ( $data['storage_profile_id'] ?? 0 ) . ':' . (string) ( $data['object_key'] ?? '' );
+				$attachment = (int) ( $data['attachment_id'] ?? 0 );
+				$relative   = (string) ( $data['local_relative_path'] ?? '' );
+				if ( isset( $rows[ $key ] ) ) {
+					$existing = $rows[ $key ];
+					if (
+						(int) ( $existing['attachment_id'] ?? 0 ) !== $attachment
+						|| (string) ( $existing['local_relative_path'] ?? '' ) !== $relative
+					) {
+						$status = (string) ( $existing['remote_status'] ?? '' );
+						if ( ! in_array( $status, array( ObjectRemoteStatus::STALE, ObjectRemoteStatus::DELETED ), true ) ) {
+							return array( 'ok' => false, 'reason' => 'key_owned_by_other_attachment', 'existing' => $existing );
+						}
+					}
+					$rows[ $key ] = array_merge( $existing, $data );
+					return array( 'ok' => true, 'id' => (int) $rows[ $key ]['id'] );
 				}
-				return (int) $rows[ $key ]['id'];
+				$rows[ $key ] = array_merge( $data, array( 'id' => $next_id++ ) );
+				return array( 'ok' => true, 'id' => (int) $rows[ $key ]['id'] );
 			}
 		);
 		$objects->method( 'find_by_attachment' )->willReturnCallback(
@@ -318,6 +413,310 @@ final class ObjectOffloadServiceTest extends TestCase {
 			$profiles,
 			$transfer
 		);
+	}
+
+	public function test_fenced_offload_stops_inventory_writes_after_lease_loss(): void {
+		$files = array(
+			'2026/08/photo.jpg' => $this->touch_file( '2026/08/photo.jpg', 8 ),
+		);
+		WpStubs::set_meta( 30, '_wp_attached_file', '2026/08/photo.jpg' );
+		WpStubs::set_meta(
+			30,
+			'_wp_attachment_metadata',
+			array(
+				'file'  => '2026/08/photo.jpg',
+				'sizes' => array(),
+			)
+		);
+
+		$service = $this->build_service(
+			$files,
+			static function (): array {
+				return array(
+					'success'           => true,
+					'verified_complete' => true,
+					'session_uuid'      => 'sess',
+					'resumed'           => false,
+					'message'           => 'ok',
+				);
+			}
+		);
+
+		$lease = new \Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle( 30, 'tok', 1, 'migrate', time() + 300 );
+		$lock  = $this->createMock( \Kazcode\WpStorage\Infrastructure\AttachmentLock::class );
+		$lock->method( 'renew' )->willReturn( false );
+
+		$this->expectException( \Kazcode\WpStorage\Infrastructure\LeaseLostException::class );
+		$service->offload( 30, false, null, $lease, $lock );
+	}
+
+	public function test_ownership_conflict_on_one_variant_does_not_offload_or_cleanup(): void {
+		$files = array(
+			'2026/08/photo.jpg'         => $this->touch_file( '2026/08/photo.jpg', 8 ),
+			'2026/08/photo-150x150.jpg' => $this->touch_file( '2026/08/photo-150x150.jpg', 4 ),
+		);
+		WpStubs::set_meta( 31, '_wp_attached_file', '2026/08/photo.jpg' );
+		WpStubs::set_meta(
+			31,
+			'_wp_attachment_metadata',
+			array(
+				'file'  => '2026/08/photo.jpg',
+				'sizes' => array(
+					'thumbnail' => array( 'file' => 'photo-150x150.jpg' ),
+				),
+			)
+		);
+
+		$settings = $this->settings_map(
+			array(
+				'delete_local_after_offload' => true,
+				'cache_control'             => 'public, max-age=31536000',
+			)
+		);
+		$keys = new \Kazcode\WpStorage\Storage\S3KeyResolver( $settings );
+		$storage = $this->createMock( S3Storage::class );
+		$storage->method( 'keys' )->willReturn( $keys );
+		$storage->method( 'head_key' )->willReturn( array( 'exists' => false ) );
+		$storage->method( 'content_type_for_local_file' )->willReturn( 'image/jpeg' );
+		$storage->expects( $this->never() )->method( 'delete_keys' );
+
+		$file_resolver = $this->getMockBuilder( AttachmentFileResolver::class )
+			->setConstructorArgs( array( $keys ) )
+			->onlyMethods( array( 'existing_local_files', 'relative_paths' ) )
+			->getMock();
+		$file_resolver->method( 'existing_local_files' )->willReturn( $files );
+		$file_resolver->method( 'relative_paths' )->willReturn( array_keys( $files ) );
+
+		$transfer = new ObjectOffloadTransferCallbackFake(
+			static function () use ( $files ): array {
+				return array(
+					'success'           => true,
+					'verified_complete' => true,
+					'session_uuid'      => 'unit',
+					'resumed'           => false,
+					'message'           => 'ok',
+				);
+			}
+		);
+
+		$profile = new StorageProfile(
+			1,
+			'uuid-test',
+			'Test Profile',
+			'aws',
+			'test-bucket',
+			'us-east-1',
+			'',
+			false,
+			'uploads/',
+			'storage',
+			'',
+			false,
+			'keys',
+			'legacy',
+			true,
+			false,
+			false,
+			gmdate( 'Y-m-d H:i:s' ),
+			gmdate( 'Y-m-d H:i:s' ),
+		);
+		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
+		$profiles->method( 'find_default_upload_target' )->willReturn( $profile );
+
+		$rows    = array();
+		$next_id = 1;
+		// Pre-existing PRESENT rows on a different profile must not satisfy coverage.
+		$rows['9:old/uploads/2026/08/photo.jpg'] = array(
+			'id'                  => $next_id++,
+			'attachment_id'       => 31,
+			'storage_profile_id'  => 9,
+			'local_relative_path' => '2026/08/photo.jpg',
+			'object_key'          => 'old/uploads/2026/08/photo.jpg',
+			'remote_status'       => ObjectRemoteStatus::PRESENT,
+			'variant_type'        => 'original',
+		);
+		$rows['9:old/uploads/2026/08/photo-150x150.jpg'] = array(
+			'id'                  => $next_id++,
+			'attachment_id'       => 31,
+			'storage_profile_id'  => 9,
+			'local_relative_path' => '2026/08/photo-150x150.jpg',
+			'object_key'          => 'old/uploads/2026/08/photo-150x150.jpg',
+			'remote_status'       => ObjectRemoteStatus::PRESENT,
+			'variant_type'        => 'size',
+		);
+		$objects = $this->createMock( ObjectRepository::class );
+		$objects->method( 'insert_owned_or_conflict' )->willReturnCallback(
+			static function ( array $data ) use ( &$rows, &$next_id ): array {
+				$key = (string) ( $data['object_key'] ?? '' );
+				if ( str_contains( $key, '150x150' ) && str_starts_with( $key, 'uploads/' ) ) {
+					return array(
+						'ok'       => false,
+						'reason'   => 'key_owned_by_other_attachment',
+						'existing' => array( 'attachment_id' => 999 ),
+					);
+				}
+				$rows[ (int) ( $data['storage_profile_id'] ?? 0 ) . ':' . $key ] = array_merge( $data, array( 'id' => $next_id++ ) );
+				return array( 'ok' => true, 'id' => $next_id - 1 );
+			}
+		);
+		$objects->method( 'find_by_attachment' )->willReturnCallback(
+			static function () use ( &$rows ): array {
+				return array_values( $rows );
+			}
+		);
+
+		$service = new ObjectOffloadService( $settings, $storage, $file_resolver, null, $objects, $profiles, $transfer );
+		$result  = $service->offload( 31, true );
+
+		$this->assertFalse( $result['success'] );
+		$this->assertSame( AttachmentOffloader::STATUS_PARTIAL, $result['status'] ?? null );
+		$this->assertSame( AttachmentOffloader::STATUS_PARTIAL, WpStubs::$post_meta[31]['_s3ms_status'] ?? null );
+		foreach ( $files as $absolute ) {
+			$this->assertFileExists( $absolute );
+		}
+	}
+
+	public function test_missing_local_manifest_path_without_inventory_blocks_offload_cleanup(): void {
+		$files = array(
+			'2026/08/photo.jpg' => $this->touch_file( '2026/08/photo.jpg', 8 ),
+		);
+		$manifest_paths = array(
+			'2026/08/photo.jpg',
+			'2026/08/photo-150x150.jpg',
+		);
+		WpStubs::set_meta( 32, '_wp_attached_file', '2026/08/photo.jpg' );
+		WpStubs::set_meta(
+			32,
+			'_wp_attachment_metadata',
+			array(
+				'file'  => '2026/08/photo.jpg',
+				'sizes' => array(
+					'thumbnail' => array( 'file' => 'photo-150x150.jpg' ),
+				),
+			)
+		);
+
+		$settings = $this->createMock( Settings::class );
+		$settings->method( 'should_delete_local' )->willReturn( true );
+		$settings->method( 'should_verify_before_delete' )->willReturn( true );
+		$settings->method( 'get' )->willReturnCallback(
+			static function ( string $key, mixed $default = null ): mixed {
+				return match ( $key ) {
+					'object_prefix' => 'uploads/',
+					'cache_control' => 'public, max-age=31536000',
+					default         => $default,
+				};
+			}
+		);
+
+		$keys    = new S3KeyResolver( $settings );
+		$storage = $this->createMock( S3Storage::class );
+		$storage->method( 'keys' )->willReturn( $keys );
+		$storage->method( 'head_key' )->willReturn( array( 'exists' => false ) );
+		$storage->method( 'content_type_for_local_file' )->willReturn( 'image/jpeg' );
+		$storage->expects( $this->never() )->method( 'delete_keys' );
+
+		$file_resolver = $this->getMockBuilder( AttachmentFileResolver::class )
+			->setConstructorArgs( array( $keys ) )
+			->onlyMethods( array( 'existing_local_files', 'relative_paths' ) )
+			->getMock();
+		$file_resolver->method( 'existing_local_files' )->willReturn( $files );
+		$file_resolver->method( 'relative_paths' )->willReturn( $manifest_paths );
+
+		$transfer = new ObjectOffloadTransferCallbackFake(
+			static function () use ( $files ): array {
+				return array(
+					'success'           => true,
+					'verified_complete' => true,
+					'session_uuid'      => 'unit',
+					'resumed'           => false,
+					'message'           => 'ok',
+				);
+			}
+		);
+
+		$service = $this->build_service_from_parts( $settings, $storage, $file_resolver, $transfer );
+		$result  = $service->offload( 32, true );
+
+		$this->assertFalse( $result['success'] );
+		$this->assertNotSame( AttachmentOffloader::STATUS_OFFLOADED, $result['status'] ?? null );
+		$this->assertNotSame( AttachmentOffloader::STATUS_OFFLOADED, WpStubs::$post_meta[32]['_s3ms_status'] ?? null );
+		$this->assertFileExists( $files['2026/08/photo.jpg'] );
+	}
+
+	/**
+	 * wp_save_image() saves edited sizes before it records the pre-edit files as
+	 * `_wp_attachment_backup_sizes`, so the reconciler marks those files stale
+	 * although they become required again. Offload must revive such a row from an
+	 * exact-key, size-matching HEAD (there is no local copy to re-upload), or the
+	 * attachment stays `partial` forever after any image edit (#54 E2E finding).
+	 */
+	public function test_required_backup_variant_with_only_a_stale_row_is_revived_from_exact_head(): void {
+		$this->assert_stale_backup_revival( array( 'exists' => true, 'content_length' => 7 ), true );
+	}
+
+	public function test_required_stale_variant_is_not_revived_when_head_size_differs(): void {
+		$this->assert_stale_backup_revival( array( 'exists' => true, 'content_length' => 99 ), false );
+	}
+
+	public function test_required_stale_variant_is_not_revived_on_uncertain_head(): void {
+		$this->assert_stale_backup_revival( array( 'exists' => false, 'error' => 'timeout' ), false );
+	}
+
+	/**
+	 * @param array<string, mixed> $backup_head HEAD result for the backup object.
+	 */
+	private function assert_stale_backup_revival( array $backup_head, bool $expect_offloaded ): void {
+		$files = array(
+			'2026/08/photo-e123.jpg' => $this->touch_file( '2026/08/photo-e123.jpg', 8 ),
+		);
+		WpStubs::set_meta( 33, '_wp_attached_file', '2026/08/photo-e123.jpg' );
+
+		$settings = $this->settings_map( array( 'object_prefix' => 'uploads/', 'cache_control' => 'public' ) );
+		$keys     = new S3KeyResolver( $settings );
+		$storage  = $this->createMock( S3Storage::class );
+		$storage->method( 'keys' )->willReturn( $keys );
+		$storage->method( 'content_type_for_local_file' )->willReturn( 'image/jpeg' );
+		$storage->method( 'head_key' )->willReturnCallback(
+			static fn( string $key ): array => $key === 'uploads/2026/08/photo.jpg'
+				? $backup_head
+				: array( 'exists' => true, 'content_length' => 8 )
+		);
+
+		$file_resolver = $this->getMockBuilder( AttachmentFileResolver::class )
+			->setConstructorArgs( array( $keys ) )
+			->onlyMethods( array( 'existing_local_files', 'relative_paths' ) )
+			->getMock();
+		$file_resolver->method( 'existing_local_files' )->willReturn( $files );
+		// Current edited file + the pre-edit original WordPress keeps as a backup.
+		$file_resolver->method( 'relative_paths' )->willReturn( array( '2026/08/photo-e123.jpg', '2026/08/photo.jpg' ) );
+
+		$transfer = new ObjectOffloadTransferCallbackFake(
+			static fn(): array => array( 'success' => true, 'verified_complete' => true, 'session_uuid' => 'unit', 'resumed' => false, 'message' => 'ok' )
+		);
+		$seed = array(
+			'1:uploads/2026/08/photo.jpg' => array(
+				'id'                  => 1,
+				'attachment_id'       => 33,
+				'storage_profile_id'  => 1,
+				'local_relative_path' => '2026/08/photo.jpg',
+				'object_key'          => 'uploads/2026/08/photo.jpg',
+				'variant_type'        => 'original',
+				'size_bytes'          => 7,
+				'remote_status'       => ObjectRemoteStatus::STALE,
+			),
+		);
+
+		$service = $this->build_service_from_parts( $settings, $storage, $file_resolver, $transfer, $seed );
+		$result  = $service->offload( 33, false );
+
+		if ( $expect_offloaded ) {
+			$this->assertTrue( $result['success'], $result['message'] );
+			$this->assertSame( AttachmentOffloader::STATUS_OFFLOADED, WpStubs::$post_meta[33]['_s3ms_status'] ?? null );
+		} else {
+			$this->assertFalse( $result['success'] );
+			$this->assertNotSame( AttachmentOffloader::STATUS_OFFLOADED, WpStubs::$post_meta[33]['_s3ms_status'] ?? null );
+		}
 	}
 
 	private function touch_file( string $relative, int $size = 1 ): string {

@@ -111,6 +111,31 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringNotContainsString('dist/kazcode-universal-storage-pro-${VERSION}.zip', $from_tag);
 	}
 
+	public function test_build_release_fails_closed_when_the_pro_package_lacks_its_required_readme(): void {
+		$script = file_get_contents($this->root . '/build/build-release.sh');
+		$verifier = file_get_contents($this->root . '/build/verify-pro-package.sh');
+
+		self::assertIsString($script);
+		self::assertIsString($verifier);
+		self::assertStringContainsString('verify-pro-package.sh', $script);
+		self::assertStringContainsString('SLUG="kazcode-universal-storage-pro"', $verifier);
+		self::assertStringContainsString('"${SLUG}/readme.txt"', $verifier);
+		self::assertStringContainsString('grep -Fxq "${SLUG}/readme.txt" <<< "${MANIFEST}"', $verifier);
+		self::assertStringNotContainsString("printf '%s\\n' \"\${MANIFEST}\" | grep", $verifier);
+	}
+
+	public function test_ci_package_audit_does_not_hide_matches_behind_pipefail_broken_pipes(): void {
+		$ci = dirname( $this->root ) . '/tools/ci/release-build.sh';
+		if ( ! is_file( $ci ) ) {
+			self::markTestSkipped( 'Repository CI scripts are not available in plugin-only test installs.' );
+		}
+		$script = file_get_contents( $ci );
+
+		self::assertIsString( $script );
+		self::assertStringNotContainsString( 'echo "$PRO_LIST" | grep', $script );
+		self::assertStringContainsString( 'grep -Fxq "kazcode-universal-storage-pro/readme.txt" <<< "$PRO_LIST"', $script );
+	}
+
 	public function test_github_free_release_notes_use_actual_pro_compatibility_not_free_version(): void {
 		$script = file_get_contents($this->root . '/build/release-github-free.sh');
 

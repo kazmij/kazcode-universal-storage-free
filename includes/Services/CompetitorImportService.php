@@ -120,9 +120,30 @@ final class CompetitorImportService {
 			'missing'          => 0,
 			'transient_errors' => 0,
 			'conflicts'        => 0,
+			'skipped'          => 0,
+			'rejected'         => $page->rejected_attachment_count(),
 		);
 
-		foreach ( $this->group_by_attachment( $page->descriptors() ) as $attachment_id => $descriptors ) {
+		$profile = $this->profiles->find( (int) $run['profile_id'] );
+		if ( ! $profile instanceof StorageProfile ) {
+			$this->runs->update( (int) $run['id'], array( 'status' => ImportRunStatus::FAILED, 'last_error_message' => 'Storage profile not found.' ) );
+			return $this->error( 'profile_not_found', 'Storage profile not found.', $this->runs->find_by_uuid( $uuid ) ?? $run );
+		}
+		$counts['processed'] += $counts['rejected'];
+		$counts['skipped']   += $counts['rejected'];
+
+		$compatible = array();
+		foreach ( $page->descriptors() as $descriptor ) {
+			if ( $this->descriptor_matches_profile( $descriptor, $profile ) ) {
+				$compatible[] = $descriptor;
+				continue;
+			}
+			// Profile-mismatched retained locations must be visible — never silently drop.
+			++$counts['skipped'];
+			++$counts['processed'];
+		}
+
+		foreach ( $this->group_by_attachment( $compatible ) as $attachment_id => $descriptors ) {
 			$result = $this->adopter->adopt_descriptors(
 				(int) $attachment_id,
 				(int) $run['profile_id'],
@@ -145,14 +166,36 @@ final class CompetitorImportService {
 			'missing'             => (int) ( $run['missing'] ?? 0 ) + $counts['missing'],
 			'transient_errors'    => (int) ( $run['transient_errors'] ?? 0 ) + $counts['transient_errors'],
 			'conflicts'           => (int) ( $run['conflicts'] ?? 0 ) + $counts['conflicts'],
+			'skipped'             => (int) ( $run['skipped'] ?? 0 ) + $counts['skipped'],
+			'rejected'            => (int) ( $run['rejected'] ?? 0 ) + $counts['rejected'],
 		);
-		if ( $status === ImportRunStatus::COMPLETED ) {
+		// Dry run that never submitted a profile-compatible descriptor must not unlock commit.
+		if (
+			$status === ImportRunStatus::COMPLETED
+			&& (string) $run['mode'] === 'dry_run'
+			&& (int) $update['verified'] === 0
+			&& (int) $update['missing'] === 0
+			&& (int) $update['transient_errors'] === 0
+			&& (int) $update['skipped'] > 0
+			&& (int) $update['processed'] === (int) $update['skipped']
+		) {
+			$update['status']             = ImportRunStatus::FAILED;
+			$update['last_error_message'] = (int) $update['rejected'] === (int) $update['processed']
+				? 'No importable descriptors were found in source metadata.'
+				: 'No descriptors matched the selected storage profile.';
+			$status                       = ImportRunStatus::FAILED;
+		}
+		if ( $status === ImportRunStatus::COMPLETED || $status === ImportRunStatus::FAILED ) {
 			$update['finished_at'] = gmdate( 'Y-m-d H:i:s' );
 		}
 		$this->runs->update( (int) $run['id'], $update );
 		$updated = $this->runs->find_by_uuid( $uuid ) ?? array_merge( $run, $update );
 		if ( $status === ImportRunStatus::COMPLETED ) {
 			$this->audit_event( 'import_finished', $updated );
+		}
+		if ( $status === ImportRunStatus::FAILED ) {
+			$message = (string) ( $updated['last_error_message'] ?? 'Import run failed.' );
+			return $this->error( 'import_run_failed', $message, $updated );
 		}
 		return $this->run_response( $updated );
 	}
@@ -213,6 +256,8 @@ final class CompetitorImportService {
 			'missing'             => 0,
 			'transient_errors'    => 0,
 			'conflicts'           => 0,
+			'skipped'             => 0,
+			'rejected'            => 0,
 			'source_fingerprint'  => $fingerprint,
 			'started_at'          => gmdate( 'Y-m-d H:i:s' ),
 		);
@@ -257,6 +302,129 @@ final class CompetitorImportService {
 	 * @param list<ImportedObjectDescriptor> $descriptors
 	 * @return array<int, list<ImportedObjectDescriptor>>
 	 */
+
+	private function descriptor_matches_profile( ImportedObjectDescriptor $descriptor, StorageProfile $profile ): bool {
+		$fingerprint = $descriptor->source_fingerprint();
+		$location    = $this->parse_descriptor_fingerprint_location( $fingerprint );
+		if ( $location === null ) {
+			// Built-in incomplete fingerprints (e.g. media-cloud:s3:unknown-bucket) must not
+			// fail open as if they were ad-hoc non-location test fingerprints.
+			foreach ( array( 'wp-offload-media:', 'advanced-media-offloader:', 'media-cloud:' ) as $prefix ) {
+				if ( str_starts_with( $fingerprint, $prefix ) ) {
+					return false;
+				}
+			}
+			return true;
+		}
+		return $this->fingerprint_location_matches_profile( $location, $profile );
+	}
+
+	/**
+	 * @return array{provider:string,bucket:string,region:?string,endpoint:?string}|null
+	 */
+	private function parse_descriptor_fingerprint_location( string $fingerprint ): ?array {
+		foreach ( array( 'wp-offload-media', 'advanced-media-offloader', 'media-cloud' ) as $source ) {
+			$prefix = $source . ':';
+			if ( ! str_starts_with( $fingerprint, $prefix ) ) {
+				continue;
+			}
+			$bits = explode( ':', substr( $fingerprint, strlen( $prefix ) ) );
+			if ( count( $bits ) < 2 ) {
+				return null;
+			}
+			$provider = (string) $bits[0];
+			$bucket   = (string) $bits[1];
+			if ( $provider === '' || $bucket === '' || str_starts_with( $provider, 'unknown-' ) || str_starts_with( $bucket, 'unknown-' ) ) {
+				return null;
+			}
+			$region = isset( $bits[2] ) && $bits[2] !== '' && ! str_starts_with( (string) $bits[2], 'unknown-' )
+				? (string) $bits[2]
+				: null;
+			$endpoint = null;
+			if ( count( $bits ) > 3 ) {
+				$raw_endpoint = implode( ':', array_slice( $bits, 3 ) );
+				if ( $raw_endpoint !== '' && ! str_starts_with( $raw_endpoint, 'unknown-' ) ) {
+					$endpoint = ( $raw_endpoint === '-' || $raw_endpoint === '.' )
+						? ''
+						: untrailingslashit( $raw_endpoint );
+				}
+			}
+			return array(
+				'provider' => $provider,
+				'bucket'   => $bucket,
+				'region'   => $region,
+				'endpoint' => $endpoint,
+			);
+		}
+		return null;
+	}
+
+	/**
+	 * @param array{provider:string,bucket:string,region:?string,endpoint:?string} $location Location.
+	 */
+	private function fingerprint_location_matches_profile( array $location, StorageProfile $profile ): bool {
+		if ( $location['bucket'] !== $profile->bucket ) {
+			return false;
+		}
+		$family = match ( $location['provider'] ) {
+			'aws', 's3', 'r2', 'wasabi', 'b2',
+			'aws_s3', 'cloudflare_r2', 'minio', 'backblaze_b2',
+			'other-s3', 'cloudflare', 'backblaze-s3' => 's3',
+			'do', 'spaces', 'digitalocean'           => 'digitalocean',
+			'gcp'                                    => 'gcs',
+			default                                  => null,
+		};
+		$profile_family = match ( $profile->provider_type ) {
+			'spaces', 'digitalocean' => 'digitalocean',
+			default => 's3',
+		};
+		if ( $family === null || $family !== $profile_family ) {
+			return false;
+		}
+		// Named provider without endpoint evidence must match the profile preset — otherwise a
+		// Wasabi/R2/B2 fingerprint can falsely bind to any S3-family profile with the same bucket.
+		if ( $location['endpoint'] === null && ! $this->named_provider_matches_profile_preset( $location['provider'], $profile->provider_type ) ) {
+			return false;
+		}
+		if ( $location['region'] !== null && $profile->region !== '' && $location['region'] !== $profile->region ) {
+			return false;
+		}
+		if ( $location['endpoint'] !== null ) {
+			$profile_endpoint = untrailingslashit( (string) $profile->endpoint );
+			if ( $location['endpoint'] !== $profile_endpoint ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * When endpoint evidence is absent, require profile.provider_type to agree with a named
+	 * competitor provider identity. Never HEAD a potentially different S3-compatible store
+	 * based only on shared bucket+region:
+	 * - named presets (Wasabi/R2/B2/MinIO/Spaces) bind only to that preset
+	 * - endpointless aws/s3 bind only to unambiguous AWS identity
+	 * - endpointless other-s3 fails closed (needs retained endpoint evidence)
+	 */
+	private function named_provider_matches_profile_preset( string $fingerprint_provider, string $profile_type ): bool {
+		$expected = match ( $fingerprint_provider ) {
+			'wasabi' => array( 'wasabi' ),
+			'cloudflare', 'r2', 'cloudflare_r2' => array( 'r2' ),
+			'backblaze-s3', 'b2', 'backblaze_b2' => array( 'b2' ),
+			'minio' => array( 'minio' ),
+			'do', 'spaces', 'digitalocean' => array( 'spaces', 'digitalocean' ),
+			// Unambiguous AWS labels only — not custom/minio without endpoint evidence.
+			'aws', 's3', 'aws_s3' => array( 'aws', 's3' ),
+			// Generic Media Cloud "other-s3" with no endpoint cannot identify the store.
+			'other-s3' => array(),
+			default => null,
+		};
+		if ( $expected === null || $expected === array() ) {
+			return false;
+		}
+		return in_array( $profile_type, $expected, true );
+	}
+
 	private function group_by_attachment( array $descriptors ): array {
 		$grouped = array();
 		foreach ( $descriptors as $descriptor ) {
@@ -270,8 +438,9 @@ final class CompetitorImportService {
 	 * @return array<string, mixed>
 	 */
 	private function run_response( array $run ): array {
-		return array(
-			'success'            => true,
+		$failed   = (string) $run['status'] === ImportRunStatus::FAILED;
+		$response = array(
+			'success'            => ! $failed,
 			'uuid'               => (string) $run['uuid'],
 			'source_type'        => (string) $run['source_type'],
 			'profile_id'         => (int) $run['profile_id'],
@@ -283,7 +452,14 @@ final class CompetitorImportService {
 			'missing'            => (int) ( $run['missing'] ?? 0 ),
 			'transient_errors'   => (int) ( $run['transient_errors'] ?? 0 ),
 			'conflicts'          => (int) ( $run['conflicts'] ?? 0 ),
+			'skipped'            => (int) ( $run['skipped'] ?? 0 ),
+			'rejected'           => (int) ( $run['rejected'] ?? 0 ),
 		);
+		if ( $failed ) {
+			$response['code']    = 'import_run_failed';
+			$response['message'] = (string) ( $run['last_error_message'] ?? 'Import run failed.' );
+		}
+		return $response;
 	}
 
 	/** @param array<string, mixed>|null $run @return array<string, mixed> */
@@ -332,6 +508,8 @@ final class CompetitorImportService {
 				'missing'          => (int) ( $run['missing'] ?? 0 ),
 				'transient_errors' => (int) ( $run['transient_errors'] ?? 0 ),
 				'conflicts'        => (int) ( $run['conflicts'] ?? 0 ),
+				'skipped'          => (int) ( $run['skipped'] ?? 0 ),
+				'rejected'         => (int) ( $run['rejected'] ?? 0 ),
 			)
 		);
 	}

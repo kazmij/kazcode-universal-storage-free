@@ -53,12 +53,54 @@ final class LocalFileProvider {
 		if (is_file($file)) {
 			return $file;
 		}
+		if (!$this->caller_reads_bytes($attachment_id)) {
+			return $file;
+		}
 		try {
 			$this->ensure_local($attachment_id, true);
 		} catch (\Throwable $e) {
 			return $file;
 		}
 		return is_file($file) ? $file : $file;
+	}
+
+	/**
+	 * WordPress asks for the attached file path all over the place just to read
+	 * its extension, size, taxonomies or URL (every image render goes through
+	 * wp_attachment_is(); the Media Library, media modal and REST do the same).
+	 * Downloading the original for those callers silently put cloud-only files
+	 * back on disk whenever an administrator browsed media, a CLI script
+	 * rendered an image or cron ran — undoing remote-only cleanup. Only callers
+	 * that actually read the bytes may materialize; integrations can opt in via
+	 * the `kazus_materialize_on_demand` filter.
+	 */
+	private const BYTE_READING_CALLERS = array(
+		'_load_image_to_edit_path',
+		'load_image_to_edit',
+		'wp_save_image',
+		'wp_restore_image',
+		'wp_crop_image',
+		'wp_generate_attachment_metadata',
+		'wp_create_image_subsizes',
+		'wp_update_image_subsizes',
+		'wp_read_image_metadata',
+		'process_regeneration',
+	);
+
+	private function caller_reads_bytes( int $attachment_id ): bool {
+		$functions = array();
+		foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 24) as $frame) { // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_debug_backtrace -- caller classification only, nothing is logged or output.
+			$functions[] = (string) ($frame['function'] ?? '');
+		}
+		$reads = array_intersect($functions, self::BYTE_READING_CALLERS) !== array();
+		/**
+		 * Whether a missing local copy of an offloaded attachment should be downloaded for this call.
+		 *
+		 * @param bool         $reads         True when a known byte-reading WordPress function is on the stack.
+		 * @param int          $attachment_id Attachment ID.
+		 * @param list<string> $functions     Function names on the call stack (innermost first).
+		 */
+		return (bool) apply_filters('kazus_materialize_on_demand', $reads, $attachment_id, $functions);
 	}
 
 	/**
@@ -70,6 +112,12 @@ final class LocalFileProvider {
 	 */
 	public function filter_original_image_path($path, int $attachment_id) {
 		if (!$this->should_materialize($attachment_id)) {
+			return $path;
+		}
+		if (is_string($path) && $path !== '' && is_file($path)) {
+			return $path;
+		}
+		if (!$this->caller_reads_bytes($attachment_id)) {
 			return $path;
 		}
 		try {

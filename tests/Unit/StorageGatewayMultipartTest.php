@@ -64,6 +64,38 @@ final class StorageGatewayMultipartTest extends TestCase {
 		);
 	}
 
+	public function test_profile_gateway_presigns_only_a_complete_upload_part_identity(): void {
+		$client  = new FakeMultipartS3Client();
+		$gateway = $this->profile_gateway( $client );
+
+		$this->expectException( \InvalidArgumentException::class );
+		$gateway->presign_upload_part( '', 'upload-123', 1, 900 );
+	}
+
+	public function test_profile_gateway_presigns_the_exact_authorized_upload_part(): void {
+		$client  = new FakeMultipartS3Client();
+		$gateway = $this->profile_gateway( $client );
+
+		$this->assertSame( 'https://uploads.example.test/part', $gateway->presign_upload_part( 'direct-upload/session/attempt/file.zip', 'upload-123', 7, 900 ) );
+		$this->assertSame(
+			array(
+				'Bucket'     => 'profile-bucket',
+				'Key'        => 'direct-upload/session/attempt/file.zip',
+				'UploadId'   => 'upload-123',
+				'PartNumber' => 7,
+			),
+			$client->calls[0]['params']
+		);
+	}
+
+	public function test_default_storage_presigns_the_exact_authorized_upload_part(): void {
+		$client  = new FakeMultipartS3Client();
+		$storage = $this->default_storage( $client );
+
+		$this->assertSame( 'https://uploads.example.test/part', $storage->presign_upload_part( 'direct-upload/session/attempt/file.zip', 'upload-123', 7, 900 ) );
+		$this->assertSame( 'default-bucket', $client->calls[0]['params']['Bucket'] );
+	}
+
 	public function test_profile_gateway_lists_parts_across_pages_and_completes_sorted_parts(): void {
 		$client = new FakeMultipartS3Client();
 		$client->responses['listParts'][] = new FakeS3Result(
@@ -120,6 +152,74 @@ final class StorageGatewayMultipartTest extends TestCase {
 			),
 			$client->calls[2]['params']['MultipartUpload']['Parts']
 		);
+	}
+
+	public function test_gateways_list_only_exact_key_incomplete_uploads_across_pages(): void {
+		$client = new FakeMultipartS3Client();
+		$client->responses['listMultipartUploads'][] = new FakeS3Result(
+			array(
+				'IsTruncated'        => true,
+				'NextKeyMarker'       => 'direct-upload/session/attempt/file.zip',
+				'NextUploadIdMarker'  => 'upload-2',
+				'Uploads'             => array(
+					array( 'Key' => 'direct-upload/session/attempt/file.zip', 'UploadId' => 'upload-1', 'Initiated' => '2026-10-01T00:00:00Z' ),
+					array( 'Key' => 'direct-upload/session/attempt/file.zip-shadow', 'UploadId' => 'wrong-key', 'Initiated' => '2026-10-01T00:00:01Z' ),
+				),
+			)
+		);
+		$client->responses['listMultipartUploads'][] = new FakeS3Result(
+			array(
+				'IsTruncated' => false,
+				'Uploads'     => array(
+					array( 'Key' => 'direct-upload/session/attempt/file.zip', 'UploadId' => 'upload-2', 'Initiated' => '2026-10-01T00:00:02Z' ),
+				),
+			)
+		);
+
+		$uploads = $this->profile_gateway( $client )->list_multipart_uploads_for_key( 'direct-upload/session/attempt/file.zip' );
+
+		$this->assertSame(
+			array(
+				array( 'upload_id' => 'upload-1', 'initiated_at' => '2026-10-01T00:00:00Z' ),
+				array( 'upload_id' => 'upload-2', 'initiated_at' => '2026-10-01T00:00:02Z' ),
+			),
+			$uploads
+		);
+		$this->assertSame(
+			array(
+				'Bucket'         => 'profile-bucket',
+				'Prefix'         => 'direct-upload/session/attempt/file.zip',
+				'KeyMarker'      => 'direct-upload/session/attempt/file.zip',
+				'UploadIdMarker' => 'upload-2',
+			),
+			$client->calls[1]['params']
+		);
+	}
+
+	public function test_gateways_format_datetime_interface_multipart_timestamps(): void {
+		foreach ( array( 'profile' => $this->profile_gateway( new FakeMultipartS3Client() ), 'default' => $this->default_storage( new FakeMultipartS3Client() ) ) as $gateway ) {
+			$client = new FakeMultipartS3Client();
+			$client->responses['listMultipartUploads'][] = new FakeS3Result(
+				array(
+					'IsTruncated' => false,
+					'Uploads'     => array(
+						array(
+							'Key'       => 'direct-upload/session/attempt/file.zip',
+							'UploadId'  => 'upload-1',
+							'Initiated' => new \DateTimeImmutable( '2026-10-01T00:00:00Z' ),
+						),
+					),
+				)
+			);
+			$this->inject_client( $gateway, $client );
+
+			$this->assertSame(
+				array(
+					array( 'upload_id' => 'upload-1', 'initiated_at' => '2026-10-01T00:00:00+00:00' ),
+				),
+				$gateway->list_multipart_uploads_for_key( 'direct-upload/session/attempt/file.zip' )
+			);
+		}
 	}
 
 	public function test_profile_gateway_get_range_uses_range_header_and_returns_sdk_body(): void {
@@ -316,6 +416,22 @@ final class FakeMultipartS3Client {
 		return $this->record( 'getObject', $params );
 	}
 
+	/** @param array<string,mixed> $params */
+	public function listMultipartUploads( array $params ): FakeS3Result {
+		return $this->record( 'listMultipartUploads', $params );
+	}
+
+	/** @param array<string,mixed> $params */
+	public function getCommand( string $name, array $params ): array {
+		$this->calls[] = array( 'method' => $name, 'params' => $params );
+		return array( 'name' => $name, 'params' => $params );
+	}
+
+	/** @param array<string,mixed> $command */
+	public function createPresignedRequest( array $command, string $expires ): FakePresignedRequest {
+		return new FakePresignedRequest();
+	}
+
 	/**
 	 * @param array<string,mixed> $params
 	 */
@@ -328,6 +444,12 @@ final class FakeMultipartS3Client {
 			throw array_shift( $this->exceptions[ $method ] );
 		}
 		return ! empty( $this->responses[ $method ] ) ? array_shift( $this->responses[ $method ] ) : new FakeS3Result();
+	}
+}
+
+final class FakePresignedRequest {
+	public function getUri(): string {
+		return 'https://uploads.example.test/part';
 	}
 }
 

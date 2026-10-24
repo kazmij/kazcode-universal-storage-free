@@ -95,23 +95,31 @@ return array(
 				$contents
 			);
 		},
-		// dbDelta() is a WordPress upgrade helper loaded from wp-admin/includes/upgrade.php
-		// immediately before use. It is intentionally global; prefixing it makes fresh
-		// package activation fatal because no scoped dbDelta() exists.
+		// PHP-Scoper prefixes the *string* argument of function_exists() in plugin
+		// code, so function_exists('wp_upload_dir') became
+		// function_exists('Kazcode\WpStorage\Vendor\wp_upload_dir') — always false.
+		// Every such guard in includes/ silently took its fallback branch in the
+		// release ZIP (no Action Scheduler, no object cache, no upload-path
+		// collision guard, ...), while the unscoped dev/test tree behaved
+		// correctly. Plugin code only ever probes WordPress/global functions, so
+		// strip the prefix from every function_exists() literal under includes/.
+		// verify-scoped-build.sh fails the build if any such literal survives.
 		static function ( string $filePath, string $prefix, string $contents ): string {
-			if ( substr( $filePath, -strlen( '/includes/Infrastructure/SchemaMigrator.php' ) ) !== '/includes/Infrastructure/SchemaMigrator.php' ) {
+			if ( ! str_contains( str_replace( '\\', '/', $filePath ), '/includes/' ) || str_contains( $filePath, '/vendor/' ) ) {
 				return $contents;
 			}
-			$contents = str_replace(
-				"function_exists('" . $prefix . "\\\\dbDelta')",
-				"function_exists('dbDelta')",
+			$contents = (string) preg_replace(
+				'/function_exists\(\s*([\'"])\\\\?' . preg_quote( str_replace( '\\', '\\\\', $prefix ), '/' ) . '\\\\+([A-Za-z_][A-Za-z0-9_]*)\1\s*\)/',
+				'function_exists($1$2$1)',
 				$contents
 			);
-			return str_replace(
-				'\\' . $prefix . '\\dbDelta(',
-				'\\dbDelta(',
+			$contents = (string) preg_replace(
+				'/function_exists\(\s*([\'"])\\\\?' . preg_quote( $prefix, '/' ) . '\\\\+([A-Za-z_][A-Za-z0-9_]*)\1\s*\)/',
+				'function_exists($1$2$1)',
 				$contents
 			);
+			// dbDelta() is loaded from wp-admin/includes/upgrade.php right before use.
+			return str_replace( '\\' . $prefix . '\\dbDelta(', '\\dbDelta(', $contents );
 		},
 	),
 );

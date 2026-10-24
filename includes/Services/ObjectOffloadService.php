@@ -11,13 +11,18 @@ namespace Kazcode\WpStorage\Services;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Attachment\AttachmentFileResolver;
 use Kazcode\WpStorage\Attachment\AttachmentOffloader;
 use Kazcode\WpStorage\Core\Settings;
 use Kazcode\WpStorage\Domain\AttachmentSyncDeriver;
 use Kazcode\WpStorage\Domain\ManifestBuilder;
+use Kazcode\WpStorage\Domain\LocalStoragePolicy;
 use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Domain\StorageProfile;
+use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
+use Kazcode\WpStorage\Infrastructure\AttachmentLock;
+use Kazcode\WpStorage\Infrastructure\LeaseLostException;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\Queue\QueueJobType;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
@@ -33,6 +38,9 @@ use Kazcode\WpStorage\Storage\S3Storage;
 final class ObjectOffloadService {
 
 	public const OPTION_ENABLED = 's3ms_object_offload_enabled';
+
+	private ?AttachmentLeaseHandle $active_lease = null;
+	private ?AttachmentLock $active_lock = null;
 
 	public function __construct(
 		private Settings $settings,
@@ -67,7 +75,28 @@ final class ObjectOffloadService {
 	 * @param array<string, mixed>|null $metadata_override Metadata from WP filter.
 	 * @return array{success:bool,message:string,files?:int,keys?:list<string>,status?:string}
 	 */
-	public function offload( int $attachment_id, ?bool $delete_local = null, ?array $metadata_override = null ): array {
+	public function offload(
+		int $attachment_id,
+		?bool $delete_local = null,
+		?array $metadata_override = null,
+		?AttachmentLeaseHandle $lease = null,
+		?AttachmentLock $lock = null
+	): array {
+		$this->active_lease = $lease;
+		$this->active_lock  = $lock;
+		try {
+			return $this->offload_fenced( $attachment_id, $delete_local, $metadata_override );
+		} finally {
+			$this->active_lease = null;
+			$this->active_lock  = null;
+		}
+	}
+
+	/**
+	 * @param array<string, mixed>|null $metadata_override Metadata from WP filter.
+	 * @return array{success:bool,message:string,files?:int,keys?:list<string>,status?:string}
+	 */
+	private function offload_fenced( int $attachment_id, ?bool $delete_local, ?array $metadata_override ): array {
 		$profile = $this->resolve_profile();
 		if ( $profile === null || $profile->id === null ) {
 			throw new \RuntimeException( 'No default storage profile configured.' );
@@ -82,24 +111,33 @@ final class ObjectOffloadService {
 			throw new \RuntimeException( 'No local files found to upload. Restore from S3 first if files were deleted.' );
 		}
 
-		$manifest     = $this->manifest_builder->build( $attachment_id, $metadata_override );
+		$manifest      = $this->manifest_builder->build( $attachment_id, $metadata_override );
 		$uploaded_keys = array();
 		$failures      = array();
+		/** @var array<string, string> $intended_bindings relative => object_key for this profile run */
+		$intended_bindings = array();
+
+		$existing_rows = $this->objects->find_by_attachment( $attachment_id );
 
 		foreach ( $manifest->items() as $item ) {
 			$relative = $item['relative'];
+			$object_key = ObjectKeyService::key_for( $profile->prefix, $relative );
+			// Every manifest path must be covered by this profile+key — including variants
+			// whose local file is already gone (remote-only). Skipping them from bindings
+			// would let a partial local upload look fully covered and delete remaining locals.
+			$intended_bindings[ $relative ] = $object_key;
 			if ( ! isset( $local_files[ $relative ] ) ) {
+				$this->revive_required_stale_row( $attachment_id, (int) $profile->id, $relative, $object_key, $item['variant_type'], $existing_rows );
 				continue;
 			}
 
-			$absolute   = $local_files[ $relative ];
-			$object_key = ObjectKeyService::key_for( $profile->prefix, $relative );
+			$absolute = $local_files[ $relative ];
 
 			try {
 				$size = (int) filesize( $absolute );
 				$head = $this->storage->head_key( $object_key );
 				if ( ! $this->head_matches_expected_size( $head, $size ) ) {
-					$this->objects->upsert(
+					if ( ! $this->write_owned_row(
 						array(
 							'attachment_id'       => $attachment_id,
 							'storage_profile_id'  => $profile->id,
@@ -110,7 +148,10 @@ final class ObjectOffloadService {
 							'remote_status'       => ObjectRemoteStatus::UPLOADING,
 							'attempt_count'       => 1,
 						)
-					);
+					) ) {
+						$failures[] = $relative . ': object key is owned by another attachment.';
+						continue;
+					}
 
 					$result = $this->transfer_service->upload_local(
 						$attachment_id,
@@ -122,7 +163,7 @@ final class ObjectOffloadService {
 					);
 					if ( empty( $result['verified_complete'] ) ) {
 						$msg = (string) ( $result['message'] ?? 'Transfer remains incomplete.' );
-						$this->objects->upsert(
+						$this->write_owned_row(
 							array(
 								'attachment_id'       => $attachment_id,
 								'storage_profile_id'  => $profile->id,
@@ -139,7 +180,7 @@ final class ObjectOffloadService {
 				}
 
 				$now = gmdate( 'Y-m-d H:i:s' );
-				$this->objects->upsert(
+				if ( ! $this->write_owned_row(
 					array(
 						'attachment_id'       => $attachment_id,
 						'storage_profile_id'  => $profile->id,
@@ -153,11 +194,16 @@ final class ObjectOffloadService {
 						'last_error_code'     => null,
 						'last_error_message'  => null,
 					)
-				);
+				) ) {
+					$failures[] = $relative . ': object key is owned by another attachment.';
+					continue;
+				}
 				$uploaded_keys[] = $object_key;
+			} catch ( LeaseLostException $e ) {
+				throw $e;
 			} catch ( \Throwable $e ) {
 				$msg = $this->safe_error_message( $e );
-				$this->objects->upsert(
+				$this->write_owned_row(
 					array(
 						'attachment_id'       => $attachment_id,
 						'storage_profile_id'  => $profile->id,
@@ -174,31 +220,47 @@ final class ObjectOffloadService {
 
 		$rows   = $this->objects->find_by_attachment( $attachment_id );
 		$status = AttachmentSyncDeriver::derive_status( $rows );
+		// Owner-preserving refusal / partial writes must not look fully offloaded via older
+		// profile rows. Require PRESENT coverage for this run's selected profile+key bindings,
+		// and never promote/cleanup when any variant failed.
+		$coverage_ok = $this->inventory_covers_intended_bindings( $rows, (int) $profile->id, $intended_bindings );
+		if ( $failures !== array() || ! $coverage_ok ) {
+			if ( $status === AttachmentOffloader::STATUS_OFFLOADED || $status === '' ) {
+				$status = $uploaded_keys !== array()
+					? AttachmentOffloader::STATUS_PARTIAL
+					: AttachmentOffloader::STATUS_FAILED;
+			}
+		}
 		$this->sync_attachment_meta( $attachment_id, $rows, $status );
 
-		if ( $status === AttachmentOffloader::STATUS_OFFLOADED ) {
-			$defer = (bool) apply_filters( 's3ms_defer_local_cleanup', false );
+		if ( $status === AttachmentOffloader::STATUS_OFFLOADED && $failures === array() && $coverage_ok ) {
+			// Metadata passed by a generate/update filter is not persisted yet, so the
+			// current-manifest revalidation must run later against saved metadata.
+			$defer = $metadata_override !== null
+				|| (bool) apply_filters( 's3ms_defer_local_cleanup', false );
 			if ( $defer ) {
-				Plugin::instance()->queue()->enqueue(
-					QueueJobType::CLEANUP_LOCAL_FILES,
-					array(
-						'attachment_id'  => $attachment_id,
-						'delete_local'   => $delete_local,
-						'profile_prefix' => $profile->prefix,
-					)
-				);
+				if ( $delete_local === true || ( $delete_local === null && $this->settings->local_storage_policy() !== LocalStoragePolicy::KEEP_ALL ) ) {
+					Plugin::instance()->queue()->enqueue(
+						QueueJobType::CLEANUP_LOCAL_FILES,
+						array(
+							'attachment_id' => $attachment_id,
+							'delete_local'  => $delete_local,
+							'profile_id'    => (int) $profile->id,
+						)
+					);
+				}
 			} else {
 				$cleanup = ( new CleanupLocalFiles( $this->settings, $this->storage ) )->maybe_cleanup(
 					$attachment_id,
 					$local_files,
 					$manifest->items(),
 					$delete_local,
-					$profile->prefix
+					(int) $profile->id
 				);
-				if ( $cleanup['skipped'] && str_contains( $cleanup['message'], 'verify failure' ) ) {
+				if ( ! empty( $cleanup['blocked_reason'] ) ) {
 					return array(
 						'success' => true,
-						'message' => 'Offloaded; local delete skipped after verify failure.',
+						'message' => 'Offloaded; local delete skipped (' . $cleanup['blocked_reason'] . ').',
 						'files'   => count( $uploaded_keys ),
 						'keys'    => $uploaded_keys,
 						'status'  => $status,
@@ -246,6 +308,115 @@ final class ObjectOffloadService {
 	}
 
 	/**
+	 * Persist an inventory row without stealing another attachment's profile+key.
+	 *
+	 * @param array<string, mixed> $data Row.
+	 */
+	private function write_owned_row( array $data ): bool {
+		$this->fence_write( 'object inventory write' );
+		$result = $this->objects->insert_owned_or_conflict( $data );
+		return ! empty( $result['ok'] );
+	}
+
+	/**
+	 * A current manifest path can have only a STALE row when WordPress persisted
+	 * metadata in two steps: wp_save_image() saves the edited sizes first (the
+	 * reconciler then marks the pre-edit files stale) and only afterwards records
+	 * them as `_wp_attachment_backup_sizes`, which makes them required again.
+	 * With no local copy to re-upload, revive the row only when an exact-key HEAD
+	 * still proves the recorded object at its recorded size; otherwise coverage
+	 * stays incomplete and nothing is cleaned up.
+	 *
+	 * @param list<array<string, mixed>> $rows Inventory rows read before this run.
+	 */
+	private function revive_required_stale_row( int $attachment_id, int $profile_id, string $relative, string $object_key, string $variant_type, array $rows ): void {
+		$stale = null;
+		foreach ( $rows as $row ) {
+			if ( (int) ( $row['storage_profile_id'] ?? 0 ) !== $profile_id
+				|| (string) ( $row['local_relative_path'] ?? '' ) !== $relative
+				|| (string) ( $row['object_key'] ?? '' ) !== $object_key ) {
+				continue;
+			}
+			$status = (string) ( $row['remote_status'] ?? '' );
+			if ( $status === ObjectRemoteStatus::PRESENT ) {
+				return;
+			}
+			if ( $status === ObjectRemoteStatus::STALE ) {
+				$stale = $row;
+			}
+		}
+		$size = $stale !== null ? (int) ( $stale['size_bytes'] ?? 0 ) : 0;
+		if ( $stale === null || $size <= 0 ) {
+			return;
+		}
+		if ( ! $this->head_matches_expected_size( $this->storage->head_key( $object_key ), $size ) ) {
+			return;
+		}
+		$now = gmdate( 'Y-m-d H:i:s' );
+		$this->write_owned_row(
+			array(
+				'attachment_id'       => $attachment_id,
+				'storage_profile_id'  => $profile_id,
+				'local_relative_path' => $relative,
+				'object_key'          => $object_key,
+				'variant_type'        => $variant_type,
+				'size_bytes'          => $size,
+				'remote_status'       => ObjectRemoteStatus::PRESENT,
+				'verified_at'         => $now,
+				'last_error_code'     => null,
+				'last_error_message'  => null,
+			)
+		);
+	}
+
+	/**
+	 * True when every intended relative has a PRESENT row on the selected profile+key.
+	 *
+	 * @param list<array<string, mixed>> $rows               Inventory rows.
+	 * @param array<string, string>      $intended_bindings  relative => object_key.
+	 */
+	private function inventory_covers_intended_bindings( array $rows, int $profile_id, array $intended_bindings ): bool {
+		if ( $intended_bindings === array() ) {
+			return false;
+		}
+		$present = array();
+		foreach ( $rows as $row ) {
+			if ( (int) ( $row['storage_profile_id'] ?? 0 ) !== $profile_id ) {
+				continue;
+			}
+			if ( (string) ( $row['remote_status'] ?? '' ) !== ObjectRemoteStatus::PRESENT ) {
+				continue;
+			}
+			$relative = (string) ( $row['local_relative_path'] ?? '' );
+			$key      = (string) ( $row['object_key'] ?? '' );
+			if ( $relative === '' || $key === '' ) {
+				continue;
+			}
+			if ( isset( $intended_bindings[ $relative ] ) && $intended_bindings[ $relative ] === $key ) {
+				$present[ $relative ] = true;
+			}
+		}
+		foreach ( $intended_bindings as $relative => $_key ) {
+			if ( ! isset( $present[ $relative ] ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Renew the caller-held attachment lease before any same-owner inventory/meta write.
+	 */
+	private function fence_write( string $stage ): void {
+		if ( ! $this->active_lease instanceof AttachmentLeaseHandle || ! $this->active_lock instanceof AttachmentLock ) {
+			return;
+		}
+		if ( ! $this->active_lock->renew( $this->active_lease ) ) {
+			throw new LeaseLostException( 'Attachment operation ownership lost before ' . $stage . '.' );
+		}
+	}
+
+	/**
 	 * @param array<string, mixed> $head HEAD result from storage.
 	 */
 	private function head_matches_expected_size( array $head, int $expected_size ): bool {
@@ -258,6 +429,7 @@ final class ObjectOffloadService {
 	 * @param list<array<string, mixed>> $rows Object rows.
 	 */
 	private function sync_attachment_meta( int $attachment_id, array $rows, string $status ): void {
+		$this->fence_write( 'offload metadata sync' );
 		update_post_meta( $attachment_id, '_s3ms_status', $status );
 
 		$original = AttachmentSyncDeriver::original_key( $rows );
@@ -279,12 +451,6 @@ final class ObjectOffloadService {
 	}
 
 	private function safe_error_message( \Throwable $e ): string {
-		$msg = $e->getMessage();
-		$msg = preg_replace( '/AKIA[0-9A-Z]{16}/', '[ACCESS_KEY]', $msg ) ?? $msg;
-		$msg = preg_replace( '/(?i)(secret|password|token)=\\S+/', '$1=[REDACTED]', $msg ) ?? $msg;
-		if ( strlen( $msg ) > 300 ) {
-			$msg = substr( $msg, 0, 297 ) . '...';
-		}
-		return $msg;
+		return SecretRedactor::redact( $e, 300 );
 	}
 }

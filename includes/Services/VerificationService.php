@@ -14,7 +14,9 @@ defined( 'ABSPATH' ) || exit;
 use Kazcode\WpStorage\Attachment\AttachmentFileResolver;
 use Kazcode\WpStorage\Attachment\AttachmentOffloader;
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Domain\RemoteObservation;
+use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Storage\S3Storage;
 
 /**
@@ -26,17 +28,20 @@ final class VerificationService {
 	private S3Storage $storage;
 	private AttachmentFileResolver $files;
 	private ProfileAwareObjectOperations $profile_ops;
+	private ObjectRepository $objects;
 
 	public function __construct(
 		Settings $settings,
 		S3Storage $storage,
 		?AttachmentFileResolver $files = null,
-		?ProfileAwareObjectOperations $profile_ops = null
+		?ProfileAwareObjectOperations $profile_ops = null,
+		?ObjectRepository $objects = null
 	) {
 		$this->settings    = $settings;
 		$this->storage     = $storage;
 		$this->files       = $files ?? new AttachmentFileResolver($storage->keys());
 		$this->profile_ops = $profile_ops ?? new ProfileAwareObjectOperations( legacy: $storage, settings: $settings );
+		$this->objects     = $objects ?? new ObjectRepository();
 	}
 
 	/**
@@ -63,6 +68,7 @@ final class VerificationService {
 		$missing_s3  = array();
 		$unknown_s3  = array();
 		$size_mismatch = array();
+		$exists_only = array();
 		$present_paths = array();
 		$present_s3  = 0;
 
@@ -71,6 +77,9 @@ final class VerificationService {
 				$local_path = $this->files->absolute_path( $relative );
 				$expected_size = is_string( $local_path ) && is_file( $local_path ) ? (int) filesize( $local_path ) : null;
 				$head = $this->profile_ops->head_attachment_relative($attachment_id, $relative);
+				if ( $expected_size === null ) {
+					$expected_size = $this->inventory_size_for_head( $attachment_id, $relative, $head );
+				}
 				$observation = RemoteObservation::from_head_result( $head, $expected_size );
 				if ($observation->verification_level === RemoteObservation::SIZE_MISMATCH) {
 					$size_mismatch[] = $relative;
@@ -79,8 +88,15 @@ final class VerificationService {
 				} elseif ($observation->is_confirmed_missing()) {
 					$missing_s3[] = $relative;
 				} elseif ($observation->status === RemoteObservation::REMOTE_PRESENT) {
-					++$present_s3;
-					$present_paths[] = $relative;
+					// Existence-only HEADs (no trustworthy expected size) must not count as
+					// size-verified present — otherwise verify can promote _s3ms_status to
+					// offloaded for variants rebuild only confirmed existed.
+					if ( $observation->verification_level === RemoteObservation::SIZE_VERIFIED ) {
+						++$present_s3;
+						$present_paths[] = $relative;
+					} else {
+						$exists_only[] = $relative;
+					}
 				}
 			}
 		} else {
@@ -106,18 +122,22 @@ final class VerificationService {
 			$status = 'remote_unknown';
 		} elseif ($size_mismatch !== array()) {
 			$status = 'remote_size_mismatch';
-		} elseif ($present_s3 === 0 && $local_count > 0 && $missing_s3 === array()) {
-			$status = 'local_only';
-		} elseif ($local_count === 0 && $present_s3 > 0 && $missing_s3 === array()) {
-			$status = 's3_only';
-			update_post_meta($attachment_id, '_s3ms_verified_at', gmdate('c'));
 		} elseif ($missing_s3 !== array() && $present_s3 > 0) {
 			$status = 'partial_offload';
 		} elseif ($is_original_missing) {
 			$status = 'missing_s3_original';
 		} elseif ($thumb_missing) {
 			$status = 'missing_s3_thumbnail';
-		} elseif ($missing_s3 === array() && $present_s3 > 0) {
+		} elseif ($exists_only !== array()) {
+			// Existence-only is informational only when nothing is confirmed missing.
+			$status = 'remote_existence_only';
+			$details[] = 'Remote existence confirmed without size verification: ' . implode( ', ', array_slice( $exists_only, 0, 10 ) );
+		} elseif ($present_s3 === 0 && $local_count > 0 && $missing_s3 === array()) {
+			$status = 'local_only';
+		} elseif ($local_count === 0 && $present_s3 > 0 && $missing_s3 === array() && $present_s3 === count( $paths )) {
+			$status = 's3_only';
+			update_post_meta($attachment_id, '_s3ms_verified_at', gmdate('c'));
+		} elseif ($missing_s3 === array() && $present_s3 > 0 && $present_s3 === count( $paths )) {
 			$status = 'OK';
 			update_post_meta($attachment_id, '_s3ms_verified_at', gmdate('c'));
 			if ($s3_status !== AttachmentOffloader::STATUS_OFFLOADED) {
@@ -148,5 +168,40 @@ final class VerificationService {
 			'missing'       => $missing_s3,
 			'unknown'       => $unknown_s3,
 		);
+	}
+
+	/**
+	 * Prefer inventory size_bytes from the same profile/key the HEAD used.
+	 *
+	 * @param array<string, mixed> $head Head result from ProfileAwareObjectOperations.
+	 */
+	private function inventory_size_for_head( int $attachment_id, string $relative, array $head ): ?int {
+		$profile_id = isset( $head['storage_profile_id'] ) ? (int) $head['storage_profile_id'] : 0;
+		$object_key = (string) ( $head['object_key'] ?? '' );
+
+		foreach ( $this->objects->find_by_attachment( $attachment_id ) as $row ) {
+			if ( (string) ( $row['local_relative_path'] ?? '' ) !== $relative ) {
+				continue;
+			}
+			$status = (string) ( $row['remote_status'] ?? '' );
+			if ( in_array( $status, array( ObjectRemoteStatus::STALE, ObjectRemoteStatus::DELETED ), true ) ) {
+				continue;
+			}
+			if ( ! array_key_exists( 'size_bytes', $row ) || $row['size_bytes'] === null || $row['size_bytes'] === '' ) {
+				continue;
+			}
+			if ( $profile_id > 0 && (int) ( $row['storage_profile_id'] ?? 0 ) !== $profile_id ) {
+				continue;
+			}
+			if ( $object_key !== '' && (string) ( $row['object_key'] ?? '' ) !== $object_key ) {
+				continue;
+			}
+			// Without locator identity (legacy fallback), only trust a PRESENT row size.
+			if ( $profile_id <= 0 && $object_key === '' && $status !== ObjectRemoteStatus::PRESENT ) {
+				continue;
+			}
+			return (int) $row['size_bytes'];
+		}
+		return null;
 	}
 }

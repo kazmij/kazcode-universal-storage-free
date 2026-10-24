@@ -94,6 +94,16 @@ final class BatchProcessor {
 
 		register_rest_route(
 			'kazcode-storage/v1',
+			'/restore-preflight',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'rest_restore_preflight' ),
+				'permission_callback' => array( $this, 'can_manage' ),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
 			'/test-connection',
 			array(
 				'methods'             => 'POST',
@@ -582,7 +592,33 @@ final class BatchProcessor {
 		$batch_size    = max(1, min(200, (int) $request->get_param('batch_size') ?: 20));
 		$attachment_id = $request->get_param('attachment_id') ? (int) $request->get_param('attachment_id') : null;
 		$after_id      = (int) $request->get_param('after_id');
-		return new \WP_REST_Response($this->migration->restore_batch($batch_size, $attachment_id, $after_id), 200);
+		$acknowledge   = \Kazcode\WpStorage\Attachment\AttachmentRestorer::explicit_true(
+			$request->get_param( 'acknowledge_warning' )
+		);
+		return new \WP_REST_Response($this->migration->restore_batch($batch_size, $attachment_id, $after_id, $acknowledge), 200);
+	}
+
+	/**
+	 * Restore preflight (non-mutating).
+	 *
+	 * @param \WP_REST_Request $request Request.
+	 */
+	public function rest_restore_preflight( \WP_REST_Request $request ): \WP_REST_Response {
+		$attachment_id = $request->get_param( 'attachment_id' ) ? (int) $request->get_param( 'attachment_id' ) : 0;
+		$ids_param     = $request->get_param( 'attachment_ids' );
+		$ids           = array();
+		if ( is_array( $ids_param ) ) {
+			foreach ( $ids_param as $id ) {
+				$id = (int) $id;
+				if ( $id > 0 ) {
+					$ids[] = $id;
+				}
+			}
+		} elseif ( $attachment_id > 0 ) {
+			$ids[] = $attachment_id;
+		}
+		$result = Plugin::instance()->restore_preflight()->preflight( $ids );
+		return new \WP_REST_Response( $result, 200 );
 	}
 
 	/**

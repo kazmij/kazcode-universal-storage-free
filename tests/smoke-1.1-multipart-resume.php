@@ -331,6 +331,47 @@ if ( empty( $local_head['exists'] ) || (int) $local_head['content_length'] !== $
 }
 $ok( 'Fresh local service graph reconciled ListParts, skipped part 1, and completed exact-size HEAD verification' );
 
+// Direct Upload migrations force multipart beneath the normal threshold so the
+// durable session gives cleanup an upload ID it can recover and abort. Exercise
+// that mode against MinIO with a one-part execution budget, then a fresh service
+// graph, to catch zero-sized ranges and zero persisted part sizes.
+$forced_source_key      = $prefix . 'forced-small-source.bin';
+$forced_destination_key = $prefix . 'forced-small-destination.bin';
+$remote_keys[] = array( 'profile_id' => $source_profile_id, 'key' => $forced_source_key );
+$remote_keys[] = array( 'profile_id' => $destination_profile_id, 'key' => $forced_destination_key );
+$source_gateway->put_object_from_file( $forced_source_key, $upload_abs, 'application/octet-stream', '' );
+remove_all_filters( 'kazus_multipart_threshold_bytes' );
+add_filter( 'kazus_multipart_threshold_bytes', static fn() => $size + 1 );
+add_filter( 'kazus_multipart_max_parts_per_execution', static fn(): int => 1 );
+$forced_first_calls = array( 'create' => array(), 'upload_part' => array(), 'list_parts' => array(), 'complete' => array(), 'get_range' => array() );
+$forced_first = $new_service( $forced_first_calls )->copy_remote( 0, $source_profile_id, $forced_source_key, $destination_profile_id, $forced_destination_key, 'application/octet-stream', '', $size, null, true );
+$session_uuids[] = (string) $forced_first['session_uuid'];
+if ( ! empty( $forced_first['success'] ) || $forced_first_calls['upload_part'] !== array( 1 ) || $forced_first_calls['get_range'] !== array( array( $forced_source_key, 0, ( 5 * 1024 * 1024 ) - 1 ) ) ) {
+	$fail( 'Forced below-threshold MinIO copy did not upload a valid first multipart range before yielding.' );
+}
+$forced_session = $sessions->find_by_uuid( (string) $forced_first['session_uuid'] );
+if ( ! is_array( $forced_session ) || (int) $forced_session['part_size_bytes'] <= 0 || (string) $forced_session['status'] !== TransferSessionStatus::UPLOADING ) {
+	$fail( 'Forced below-threshold MinIO copy did not persist a positive resumable part size.' );
+}
+
+remove_all_filters( 'kazus_multipart_max_parts_per_execution' );
+$forced_second_calls = array( 'create' => array(), 'upload_part' => array(), 'list_parts' => array(), 'complete' => array(), 'get_range' => array() );
+$forced_second = $new_service( $forced_second_calls )->copy_remote( 0, $source_profile_id, $forced_source_key, $destination_profile_id, $forced_destination_key, 'application/octet-stream', '', $size, null, true );
+if ( empty( $forced_second['success'] ) || empty( $forced_second['resumed'] ) || $forced_second_calls['list_parts'] === array() || in_array( 1, $forced_second_calls['upload_part'], true ) ) {
+	$fail( 'Forced below-threshold MinIO resume did not reconcile and skip completed part 1.' );
+}
+$forced_head = $destination_gateway->head_key( $forced_destination_key );
+if ( empty( $forced_head['exists'] ) || (int) $forced_head['content_length'] !== $size ) {
+	$fail( 'Forced below-threshold MinIO copy did not finish with an exact destination HEAD.' );
+}
+$ok( 'Forced below-threshold MinIO copy resumed with positive part size and no duplicate part 1' );
+
+// Restore the multipart controls established for the existing smoke scenarios.
+// The forced-small copy temporarily raises only the threshold to exercise the
+// forced-multipart path; the following Pro migration expects threshold=1.
+remove_all_filters( 'kazus_multipart_threshold_bytes' );
+add_filter( 'kazus_multipart_threshold_bytes', static fn(): int => 1 );
+
 if ( class_exists( MigrateObjectService::class ) && ModuleRegistry::instance()->has_pro_module() ) {
 	$source_key       = $prefix . 'pro-source.bin';
 	$pro_relative     = '2026/09/pro-source.bin';

@@ -22,12 +22,28 @@ final class MultipartPlanTest extends TestCase {
 		$this->assertSame( 1, $plan->part_count() );
 	}
 
+	public function test_forced_multipart_below_threshold_uses_a_valid_single_part_plan(): void {
+		$plan = MultipartPlan::for_forced_multipart_size( 11, 100 * 1024 * 1024, 64 * 1024 * 1024 );
+
+		$this->assertTrue( $plan->uses_multipart() );
+		$this->assertSame( 64 * 1024 * 1024, $plan->part_size_bytes() );
+		$this->assertSame( 1, $plan->part_count() );
+	}
+
 	public function test_starts_multipart_at_exact_threshold(): void {
 		$plan = MultipartPlan::for_size( 100 * 1024 * 1024, 100 * 1024 * 1024, 64 * 1024 * 1024 );
 
 		$this->assertTrue( $plan->uses_multipart() );
 		$this->assertSame( 64 * 1024 * 1024, $plan->part_size_bytes() );
 		$this->assertSame( 2, $plan->part_count() );
+	}
+
+	public function test_normal_planning_keeps_its_threshold_boundary(): void {
+		$threshold = 100 * 1024 * 1024;
+
+		$this->assertFalse( MultipartPlan::for_size( $threshold - 1, $threshold, 5 * 1024 * 1024 )->uses_multipart() );
+		$this->assertTrue( MultipartPlan::for_size( $threshold, $threshold, 5 * 1024 * 1024 )->uses_multipart() );
+		$this->assertTrue( MultipartPlan::for_size( $threshold + 1, $threshold, 5 * 1024 * 1024 )->uses_multipart() );
 	}
 
 	public function test_uses_requested_default_part_size_when_safe(): void {

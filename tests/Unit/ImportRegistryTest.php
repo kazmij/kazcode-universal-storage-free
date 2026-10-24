@@ -41,6 +41,7 @@ final class ImportRegistryTest extends TestCase {
 
 		$this->assertSame( 1, count( array_keys( $ids, 'wp-offload-media', true ) ) );
 		$this->assertSame( 1, count( array_keys( $ids, 'advanced-media-offloader', true ) ) );
+		$this->assertSame( 1, count( array_keys( $ids, 'media-cloud', true ) ) );
 	}
 
 	public function test_detection_serialization_contains_only_approved_non_secret_fields(): void {
@@ -184,5 +185,9 @@ final class FakeImporter implements ImporterInterface {
 
 	public function scan_page( int $limit, int $after_attachment_id = 0 ): ImportScanPage {
 		return new ImportScanPage( $limit, $after_attachment_id, array() );
+	}
+
+	public function descriptors_for_attachment( int $attachment_id ): array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter
+		return array();
 	}
 }

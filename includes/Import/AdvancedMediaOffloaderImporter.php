@@ -186,7 +186,7 @@ final class AdvancedMediaOffloaderImporter implements ImporterInterface {
 	}
 
 	/** @return list<ImportedObjectDescriptor> */
-	private function descriptors_for_attachment( int $attachment_id ): array {
+	public function descriptors_for_attachment( int $attachment_id ): array {
 		if ( $attachment_id <= 0 ) {
 			return array();
 		}
@@ -268,14 +268,22 @@ final class AdvancedMediaOffloaderImporter implements ImporterInterface {
 	}
 
 	private function fingerprint( int $attachment_id ): string {
-		return implode(
-			':',
-			array(
-				self::SOURCE_ID,
-				$this->string_or_null( get_post_meta( $attachment_id, 'advmo_provider', true ) ) ?? 'unknown-provider',
-				$this->string_or_null( get_post_meta( $attachment_id, 'advmo_bucket', true ) ) ?? 'unknown-bucket',
-			)
+		$parts = array(
+			self::SOURCE_ID,
+			$this->string_or_null( get_post_meta( $attachment_id, 'advmo_provider', true ) ) ?? 'unknown-provider',
+			$this->string_or_null( get_post_meta( $attachment_id, 'advmo_bucket', true ) ) ?? 'unknown-bucket',
 		);
+		$region   = $this->string_or_null( get_post_meta( $attachment_id, 'advmo_region', true ) );
+		// Only attachment-level endpoint meta is historical evidence — never current detect().
+		$endpoint = $this->string_or_null( get_post_meta( $attachment_id, 'advmo_endpoint', true ) );
+		// Keep legacy provider:bucket fingerprints when neither region nor endpoint is known.
+		if ( $region !== null || $endpoint !== null ) {
+			$parts[] = $region ?? 'unknown-region';
+		}
+		if ( $endpoint !== null ) {
+			$parts[] = untrailingslashit( $endpoint );
+		}
+		return implode( ':', $parts );
 	}
 
 	private function has_credential_material( ?string $credential_key, array $credentials ): bool {

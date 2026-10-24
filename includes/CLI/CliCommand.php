@@ -20,6 +20,7 @@ use Kazcode\WpStorage\Services\ObjectStatsAggregator;
 use Kazcode\WpStorage\Services\RepairAttachmentService;
 use Kazcode\WpStorage\Services\RepairObjectService;
 use Kazcode\WpStorage\Services\AdoptService;
+use Kazcode\WpStorage\Services\RebuildInventoryService;
 
 /**
  * CLI commands for status, test, migrate, verify, retry, restore.
@@ -237,8 +238,20 @@ final class CliCommand {
 	 * [--attachment-id=<id>]
 	 * : Single attachment.
 	 *
+	 * [--preflight]
+	 * : Run Restore Preflight only (no downloads). Reports SAFE/WARNING/BLOCKED.
+	 *
+	 * [--acknowledge-warning]
+	 * : Explicitly allow WARNING preflight outcomes to proceed with restore.
+	 *   Required for WARNING; ignored for SAFE; cannot bypass BLOCKED.
+	 *
 	 * [--verbose]
 	 * : Verbose output.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp universal-storage restore --attachment-id=42 --preflight
+	 *     wp universal-storage restore --attachment-id=42 --acknowledge-warning
 	 *
 	 * @when after_wp_load
 	 *
@@ -249,14 +262,76 @@ final class CliCommand {
 		$batch_size    = isset($assoc['batch-size']) ? (int) $assoc['batch-size'] : 100;
 		$attachment_id = isset($assoc['attachment-id']) ? (int) $assoc['attachment-id'] : null;
 		$verbose       = isset($assoc['verbose']);
+		$preflight_only = isset($assoc['preflight']);
+		// Flag presence only — never coerce random truthy strings.
+		$acknowledge   = isset($assoc['acknowledge-warning']);
 
-		$result = $this->plugin->migration_service()->restore_batch($batch_size, $attachment_id);
+		if ($preflight_only) {
+			$ids = array();
+			if ($attachment_id !== null && $attachment_id > 0) {
+				$ids = array($attachment_id);
+			} else {
+				// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- CLI preflight mirrors restore_batch selection.
+				$q = new \WP_Query(
+					array(
+						'post_type'      => 'attachment',
+						'post_status'    => 'inherit',
+						'posts_per_page' => $batch_size,
+						'fields'         => 'ids',
+						'meta_key'       => '_s3ms_status',
+						'meta_value'     => \Kazcode\WpStorage\Attachment\AttachmentOffloader::STATUS_OFFLOADED,
+						'orderby'        => 'ID',
+						'order'          => 'ASC',
+					)
+				);
+				$ids = array_map('intval', $q->posts);
+			}
+			$result = $this->plugin->restore_preflight()->preflight($ids);
+			$this->print_preflight_result($result);
+			if ((string) ($result['outcome'] ?? '') === 'BLOCKED') {
+				\WP_CLI::error('Restore preflight BLOCKED.');
+			}
+			if ((string) ($result['outcome'] ?? '') === 'WARNING') {
+				\WP_CLI::warning('Restore preflight WARNING — pass --acknowledge-warning to proceed with restore.');
+				return;
+			}
+			\WP_CLI::success('Restore preflight SAFE.');
+			return;
+		}
+
+		$result = $this->plugin->migration_service()->restore_batch($batch_size, $attachment_id, 0, $acknowledge);
 		if ($verbose) {
 			foreach ($result['results'] as $row) {
 				\WP_CLI::line(wp_json_encode($row));
 			}
 		}
+		foreach ($result['results'] as $row) {
+			if (!empty($row['preflight']) && is_array($row['preflight'])) {
+				$this->print_preflight_result($row['preflight']);
+			}
+			if (($row['status'] ?? '') === 'warning_requires_acknowledge') {
+				\WP_CLI::warning((string) ($row['message'] ?? 'WARNING requires --acknowledge-warning'));
+			}
+		}
+		if ((int) ($result['failed'] ?? 0) > 0 && (int) ($result['success'] ?? 0) === 0) {
+			\WP_CLI::error(sprintf('Restore failed. success=%d failed=%d', $result['success'], $result['failed']));
+		}
 		\WP_CLI::success(sprintf('Restore finished. success=%d failed=%d', $result['success'], $result['failed']));
+	}
+
+	/**
+	 * @param array<string, mixed> $result Preflight DTO array.
+	 */
+	private function print_preflight_result(array $result): void {
+		\WP_CLI::line(sprintf('outcome: %s', (string) ($result['outcome'] ?? '')));
+		\WP_CLI::line(sprintf('required_bytes: %d', (int) ($result['required_bytes'] ?? 0)));
+		$free = $result['free_bytes'] ?? null;
+		\WP_CLI::line(sprintf('free_bytes: %s', $free === null || $free === false ? 'unknown' : (string) (int) $free));
+		\WP_CLI::line(sprintf('reserve_bytes: %d', (int) ($result['reserve_bytes'] ?? 0)));
+		$reasons = is_array($result['reasons'] ?? null) ? $result['reasons'] : array();
+		\WP_CLI::line(sprintf('reasons: %s', $reasons === array() ? '(none)' : implode(', ', $reasons)));
+		$counts = is_array($result['counts'] ?? null) ? $result['counts'] : array();
+		\WP_CLI::line('counts: ' . wp_json_encode($counts));
 	}
 
 	/**
@@ -571,6 +646,94 @@ final class CliCommand {
 				(int) ( $result['failed'] ?? 0 )
 			)
 		);
+	}
+
+	/**
+	 * Rebuild storage inventory via exact-key HEAD (Integrity §6.3).
+	 *
+	 * ## OPTIONS
+	 *
+	 * --attachment-id=<id>
+	 * : Attachment to rebuild (required for this leaf).
+	 *
+	 * [--profile-id=<id>]
+	 * : Explicit storage profile id when compatible with surviving rows.
+	 *
+	 * [--dry-run]
+	 * : Observe only; no inventory writes.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp universal-storage rebuild-inventory --attachment-id=42 --dry-run
+	 *     wp universal-storage rebuild-inventory --attachment-id=42
+	 *
+	 * @when after_wp_load
+	 *
+	 * @param list<string>         $args Args.
+	 * @param array<string, mixed> $assoc Assoc.
+	 */
+	public function rebuild_inventory( array $args, array $assoc ): void {
+		$attachment_id = $this->cli_rebuild_attachment_id( $assoc );
+		$profile_id    = $this->cli_rebuild_profile_id( $assoc );
+		$dry_run       = isset( $assoc['dry-run'] );
+
+		$result = $this->plugin->rebuild_inventory()->rebuild_attachment( $attachment_id, $profile_id, $dry_run );
+		\WP_CLI::line( wp_json_encode( $result ) );
+		$counts  = is_array( $result['counts'] ?? null ) ? $result['counts'] : array();
+		$outcome = (string) ( $result['outcome'] ?? ( empty( $result['success'] ) ? 'failed' : 'complete' ) );
+		$summary = sprintf(
+			'Rebuild %s %s. scanned=%d present=%d exists_only=%d adopted=%d missing=%d conflicts=%d auth=%d transient=%d',
+			$dry_run ? 'dry-run' : 'apply',
+			$outcome,
+			(int) ( $counts['scanned'] ?? 0 ),
+			(int) ( $counts['present'] ?? 0 ),
+			(int) ( $counts['exists_only'] ?? 0 ),
+			(int) ( $counts['present_adopted'] ?? 0 ),
+			(int) ( $counts['confirmed_missing'] ?? 0 ),
+			(int) ( $counts['conflicts'] ?? 0 ),
+			(int) ( $counts['auth'] ?? 0 ),
+			(int) ( $counts['transient'] ?? 0 )
+		);
+		if ( $outcome === RebuildInventoryService::OUTCOME_FAILED ) {
+			\WP_CLI::error( (string) ( $result['message'] ?? $summary ) );
+		}
+		if ( $outcome === RebuildInventoryService::OUTCOME_PARTIAL ) {
+			\WP_CLI::warning( $summary );
+			return;
+		}
+		\WP_CLI::success( $summary );
+	}
+
+	/**
+	 * Parse required --attachment-id for rebuild-inventory (reject non-digit / zero).
+	 *
+	 * @param array<string, mixed> $assoc Assoc.
+	 */
+	private function cli_rebuild_attachment_id( array $assoc ): int {
+		if ( ! array_key_exists( 'attachment-id', $assoc ) ) {
+			\WP_CLI::error( '--attachment-id is required.' );
+		}
+		$raw = trim( (string) $assoc['attachment-id'] );
+		if ( $raw === '' || ! ctype_digit( $raw ) || (int) $raw <= 0 ) {
+			\WP_CLI::error( 'Provide a valid positive --attachment-id.' );
+		}
+		return (int) $raw;
+	}
+
+	/**
+	 * Parse optional --profile-id for rebuild-inventory (reject zero/negative/non-numeric).
+	 *
+	 * @param array<string, mixed> $assoc Assoc.
+	 */
+	private function cli_rebuild_profile_id( array $assoc ): ?int {
+		if ( ! array_key_exists( 'profile-id', $assoc ) ) {
+			return null;
+		}
+		$raw = trim( (string) $assoc['profile-id'] );
+		if ( $raw === '' || ! ctype_digit( $raw ) || (int) $raw <= 0 ) {
+			\WP_CLI::error( 'Provide a valid positive --profile-id.' );
+		}
+		return (int) $raw;
 	}
 
 	/**

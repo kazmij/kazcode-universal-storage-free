@@ -19,8 +19,12 @@ Evidence tag: **CONFIRMED** = covered by unit characterization tests or source a
 | Behavior | Expected | Test |
 |----------|----------|------|
 | Put fails mid-batch | `_s3ms_status=failed`; local files kept; no `wp_delete_file`; uploaded keys **not** rolled back | `OffloadSafetyCharacterizationTest::test_partial_upload_failure_does_not_delete_local_files` |
-| `local_storage_policy=keep_originals` | After verify, delete size variants only; original kept locally | `…::test_keep_originals_deletes_size_variants_only`, `CleanupLocalFilesTest::test_keep_originals_deletes_only_sizes` |
-| `local_storage_policy=remote_only`, verify Head fails | Stay `offloaded`; set `_s3ms_last_error`; **keep** local | `…::test_verify_before_delete_true_skips_local_delete_when_head_fails`, `CleanupLocalFilesTest::test_verify_failure_skips_delete` |
+| `local_storage_policy=keep_originals` | After the gate below passes, delete size variants only; original kept locally | `CleanupLocalFilesTest::test_profile_and_full_manifest_are_passed_to_eligibility` |
+| Legacy (non-inventory) offload path | No `s3ms_objects` rows → cleanup blocked, all locals kept | `OffloadSafetyCharacterizationTest::test_legacy_path_without_inventory_keeps_size_variants` |
+| `remote_only`, verify HEAD fails / transient / auth / size mismatch | Stay `offloaded`; set sanitized `_s3ms_last_error`; **keep** local | `…::test_verify_before_delete_true_skips_local_delete_when_head_fails`, `CleanupEligibilityTest::test_transient_auth_or_unknown_head_never_authorizes` |
+| Cleanup eligibility (#53) | **Every current manifest artifact** (not just the files being deleted) must have one authoritative `present` inventory row re-read from the DB, an exact-key size-verified HEAD on its **recorded** profile (no legacy fallback), and remote delivery (`serve_from_s3` + public URL config + `_s3ms_status=offloaded`, URL outside uploads). Unknown/error fails closed. | `CleanupEligibilityTest`, `CleanupDeliveryProbeTest` |
+| Metadata changes between verify and delete | Manifest re-read from persisted metadata right before delete; any difference blocks (`manifest_changed`) | `CleanupLocalFilesTest::test_metadata_changed_after_verification_blocks_stale_deletion` |
+| Offload from a generate/update metadata filter | Cleanup deferred to `cleanup_local_files` job (metadata not persisted yet); job re-derives manifest and re-runs the gate | `CleanupLocalFilesJobHandler` |
 | Verify before local delete | **Always required** (P5-T03); no opt-out toggle | `CleanupLocalFiles::maybe_cleanup` |
 
 ## Delete attachment keys (P0-T04)
@@ -86,6 +90,13 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 |----------|----------|------|
 | DB-first health scan | Classify rows by `remote_status` + local file presence; no S3 LIST on admin load | `HealthScanServiceTest` |
 | Repair remote_missing | Re-upload when local exists; update row to `present` | `RepairObjectServiceTest::test_reuploads_when_remote_missing_and_local_exists` |
+| Repair is profile-aware and size-verified | Upload + HEAD go through `ProfileAwareObjectOperations::upload_file_for_object_row()` on the row's own profile; `present` only after a size-verified HEAD; unresolved profile never falls back to default storage; `deleted` rows are `stale` (not repairable) | `RepairObjectServiceTest` |
+| Integrity Verify dry run | Observation only (no `upsert`); expected size: local file → inventory `size_bytes` (>0) → existence-only; mismatch = `size_conflict`; transient/auth HEAD errors = `unknown`; stale/deleted/pending/uploading rows skipped | `IntegrityVerifyServiceTest` |
+| Integrity Verify apply | Re-observes under the attachment lease; writes only `present` (size-verified) or `missing` (confirmed 404); never writes `size_bytes`; locked attachments skipped; audit entry has counts only | `IntegrityVerifyServiceTest`, `integrity-verify-repair-isolated.spec.js` |
+| Integrity apply needs a dry run | Apply acts only on the current user's stored dry-run rows (≤1 h old) and consumes them; browser-posted ids are never used | `IntegrityActionsTest` |
+| Integrity Delivery drift | Report only (no HEAD, no write, no content rewrite); remote state from inventory only, so `artifact_unavailable` says "confirmed missing" only for a `missing` row (written on a confirmed 404); stale/deleted rows are superseded, a migrated attachment with stale source rows is not drift; content lookup is one bounded query per attachment | `DeliveryDriftServiceTest`, `integrity-drift-isolated.spec.js`, `integrity-real.spec.js` |
+| Integrity Policy reconciliation | Dry run reads DB + local files only; `local_missing` repairable only with a verified PRESENT row (stale rows never count) and downloads that exact profile/key with the recorded size; `local_retained` apply calls `CleanupLocalFiles` (eligibility gate unchanged); apply re-analyzes under the lease and skips anything no longer applying; non-repairable finding types are ignored even if posted | `PolicyReconciliationServiceTest`, `IntegrityActionsTest`, `integrity-real.spec.js` |
+| Upload filename reservation | A path owned by any inventory row (any status), another attachment's `_wp_attached_file`, a Direct Upload reservation or a local file is not reused by `wp_unique_filename` | `UploadPathCollisionGuardTest` |
 | Orphan scan | LIST prefix page vs known `object_key` inventory; **dry-run only** | `OrphanScanServiceTest` |
 | CleanupLocalFiles job | Runs only when all object rows `present` + `verified_at` | `CleanupLocalFilesJobHandler` |
 | HEAD confirmed-missing vs transient error | `S3Storage`/`ProfileStorageGateway::head_key()` set `confirmed_missing=true` only for 404/NoSuchKey/NotFound; any other HEAD failure (network, throttling, auth) returns `exists=false, confirmed_missing=false, error=...` and must **not** be persisted as `remote_status=missing` by callers that write inventory state (fixed bug — see Adopt below) | `HeadKeyConfirmedMissingTest` |
@@ -116,6 +127,7 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 |----------|----------|------|
 | Default plan | `Features::plan()` is `lite` (no Pro capabilities) unless a Pro module is registered — a prior default-plan-is-pro bug meant this path was never exercised until the default flipped to lite | `FeaturesProTest::test_default_plan_is_lite_and_blocks_pro_features` |
 | No production plan override | There is no constant or filter that can make `is_pro_active()` true without a real Pro module registering via `ModuleRegistry` — a leftover `kazus_plan` filter (the old override, now removed) is inert | `FeaturesProTest::test_kazus_plan_filter_no_longer_has_any_effect` |
+| Feature filter cannot unlock Pro | `kazus_feature_enabled` may narrow Pro capabilities, but forcing it to `true` without a registered Pro module leaves every `pro_feature_keys()` entry disabled (and `ProFeatureGate::require()` still throws) | `FeaturesProTest::test_feature_enabled_filter_cannot_unlock_pro_without_module`, `FeaturesProTest::test_feature_enabled_filter_can_narrow_when_pro_active`, `ProFeatureGateTest::test_require_still_throws_when_feature_filter_forced_true` |
 | Pro module | `ModuleRegistry::has_pro_module()` is the sole source of truth for Pro tier | `FeaturesProTest::test_core_with_active_pro_module_is_pro_active` |
 | Service gates | `MigrateObjectService`, `OrphanScanService`, profile `insert` (2nd+ row) reject on lite | `ProFeatureGateTest` |
 | Pro add-on | Separate plugin `kazcode-universal-storage-pro` registers `ProModule` on `plugins_loaded` priority 9 | manual / activation dependency |
@@ -124,7 +136,7 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 
 | Behavior | Expected | Test |
 |----------|----------|------|
-| Supported Free import sources | Only WP Offload Media and Advanced Media Offloader adapters are registered; no Media Cloud, WP-Stateless, or Next3 importer is implied | `ImportRegistryTest`, `WpOffloadMediaImporterTest`, `AdvancedMediaOffloaderImporterTest` |
+| Supported Free import sources | WP Offload Media, Advanced Media Offloader, and Media Cloud (S3-compatible drivers with retained `s3.key` only) are registered; no WP-Stateless or Next3 importer is implied | `ImportRegistryTest`, `WpOffloadMediaImporterTest`, `AdvancedMediaOffloaderImporterTest`, `MediaCloudImporterTest` |
 | Import safety | Detection/scanning are read-only, dry-run writes no normal object inventory, and commit requires a completed matching dry-run fingerprint | `CompetitorImportServiceTest` |
 | Credential boundary | Import DTOs, REST/CLI responses, reports, and audit context contain no copied competitor credential material | `ImportRegistryTest`, `CompetitorImportRestTest`, `CompetitorImportCliTest` |
 | Exact source key and transient HEAD handling | Verified descriptors are adopted by their exact source key; whitespace-only keys are rejected; only definitive not-found may become `missing` | `AdoptExactKeyTest`, `HeadKeyConfirmedMissingTest` |
@@ -193,6 +205,22 @@ Several call sites previously recorded an event with **empty** context, making t
 | Acceptance smoke | §36 infra checks (partial, retry, repair, queue, IA) | `test-v2-acceptance.php` |
 | Superseded variants don't flip status to failed (fixed bug) | `AttachmentSyncDeriver::derive_status()` excludes `stale`/`deleted` object rows from the present/total roll-up, so a fully-offloaded attachment stays `offloaded` after Image Editor crop, Regenerate Thumbnails, or a storage-profile migration leaves the old variant row behind as `stale` — previously it incorrectly derived as `failed`, which broke `AttachmentUrlFilter` URL rewriting for that attachment (Scenario F) | `AttachmentSyncDeriverTest::test_stale_variant_is_excluded_from_roll_up` et al. |
 
+## WordPress media lifecycle matrix (Issue #7)
+
+Authoritative scenario → evidence table (HEIC retention, Image Editor backups, regenerate/stale roll-up, WebP/AVIF hooks, animated poster negative characterization, WooCommerce status, upload→HEAD→cleanup failure points):
+
+See `tests/LIFECYCLE-MATRIX.md`.
+
+Key automated additions:
+
+| Behavior | Expected | Test |
+|----------|----------|------|
+| HEIC-style `original_image` sibling | Enumerated beside generated JPEG attached file | `ManifestBuilderTest::test_includes_original_image_sibling_for_heic_style_retention` |
+| Image Editor `_wp_attachment_backup_sizes` | Enumerated in expected-file model | `ManifestBuilderTest::test_includes_image_editor_backup_sizes` |
+| Optimizer sidecars | Only via `kazus_manifest_files` / variant providers | `ManifestBuilderTest`, `MediaVariantRegistryTest` |
+| Animated video/poster meta keys | Not auto-included by Core manifest | `ManifestBuilderTest::test_does_not_auto_include_animated_video_or_poster_metadata_keys` |
+| Regenerate-style stale+new sizes | Attachment stays `offloaded` | `AttachmentSyncDeriverTest::test_regenerate_thumbnails_style_stale_plus_new_size_stays_offloaded` |
+
 ## Uninstall (`uninstall.php`)
 
 Not PHPUnit-testable (needs a real DB + `WP_UNINSTALL_PLUGIN` context) — verified manually against a real WordPress install each time this file changes. Never touches remote storage, WordPress attachment posts, or local media files, in either mode below.
@@ -207,3 +235,13 @@ Not PHPUnit-testable (needs a real DB + `WP_UNINSTALL_PLUGIN` context) — verif
 ## PHP
 
 Requires **PHP 8.3+** (WordPress.org recommended baseline). Local APTA Docker: PHP 8.4.
+
+## Safe Mode (#61)
+
+| Behavior | Expected | Test |
+|----------|----------|------|
+| Write guard | Every SDK write in `S3Storage`/`ProfileStorageGateway` (put, multipart create/part/complete/abort, presigned part, copy, stream destination, delete) calls `SafeMode::guard_write()` first; reads never do | `SafeModeTest::test_storage_write_is_refused_before_the_sdk_is_called`, `safe-mode-isolated.spec.js` |
+| Clone detection | Stored identity home ≠ current home, or production → non-production, blocks before any storage request; with no inventory it rebinds instead | `SafeModeTest` |
+| Namespace ownership | First write claims `<prefix>.kazcode-site-owner.json` (plugin, site_id, home, claimed_at only); another site's marker blocks; unreadable marker fails closed; claim cached 10 min per namespace + identity | `SafeModeTest`, `safe-mode-real.spec.js` |
+| Operator decisions | rebind keeps the id; independent takes a new id; takeover needs explicit confirmation; each is audited | `SafeModeTest`, `safe-mode-isolated.spec.js` |
+| Local cleanup / attachment delete | Cleanup blocked (`safe_mode`) on identity mismatch; attachment delete still succeeds in WordPress, remote objects and inventory rows are kept and `remote_delete_skipped` is audited | `SafeModeTest::test_local_cleanup_is_refused_while_writes_are_paused`, `safe-mode-isolated.spec.js` |

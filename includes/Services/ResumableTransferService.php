@@ -11,6 +11,7 @@ namespace Kazcode\WpStorage\Services;
 
 defined( 'ABSPATH' ) || exit;
 
+use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Domain\TransferSessionStatus;
 use Kazcode\WpStorage\Storage\MultipartPlan;
 use Kazcode\WpStorage\Storage\PathGuard;
@@ -226,7 +227,9 @@ final class ResumableTransferService {
 		string $destination_key,
 		string $content_type,
 		string $cache_control,
-		int $expected_size
+		int $expected_size,
+		?callable $multipart_created = null,
+		bool $force_multipart = false
 	): array {
 		if ( $source_profile_id <= 0 || $destination_profile_id <= 0 || $source_key === '' || $destination_key === '' ) {
 			throw new \InvalidArgumentException( 'Remote copy source and destination are required.' );
@@ -237,14 +240,14 @@ final class ResumableTransferService {
 		$source_head         = $this->remote_source_head( $source_gateway, $source_key, $expected_size );
 		$size                = (int) $source_head['content_length'];
 		$fingerprint         = $this->remote_source_fingerprint( $source_profile_id, $source_key, $size, $source_head );
-		$plan                = MultipartPlan::for_size(
-			$size,
-			$this->filtered_bytes( 'kazus_multipart_threshold_bytes', self::DEFAULT_THRESHOLD_BYTES ),
-			$this->filtered_bytes( 'kazus_multipart_part_size_bytes', self::DEFAULT_PART_SIZE_BYTES )
-		);
+		$threshold           = $this->filtered_bytes( 'kazus_multipart_threshold_bytes', self::DEFAULT_THRESHOLD_BYTES );
+		$requested_part_size = $this->filtered_bytes( 'kazus_multipart_part_size_bytes', self::DEFAULT_PART_SIZE_BYTES );
+		$plan                = $force_multipart
+			? MultipartPlan::for_forced_multipart_size( $size, $threshold, $requested_part_size )
+			: MultipartPlan::for_size( $size, $threshold, $requested_part_size );
 		$session_uuid        = $this->uuid();
 
-		if ( ! $plan->uses_multipart() ) {
+		if ( ! $plan->uses_multipart() && ! $force_multipart ) {
 			$this->copy_remote_single( $source_gateway, $destination_gateway, $source_key, $destination_key, $content_type, $cache_control, $size );
 			return $this->verify_destination( $destination_gateway, $destination_key, $size, $session_uuid, false );
 		}
@@ -257,6 +260,10 @@ final class ResumableTransferService {
 			$session_uuid  = (string) $session['uuid'];
 			$upload_id     = (string) $session['multipart_upload_id'];
 			$part_size     = (int) $session['part_size_bytes'];
+			if ( $part_size <= 0 ) {
+				$part_size = $plan->part_size_bytes();
+				$this->sessions->update( $session_id, array( 'part_size_bytes' => $part_size ) );
+			}
 			$part_count    = intdiv( $size + $part_size - 1, $part_size );
 			if ( (string) ( $session['status'] ?? '' ) === TransferSessionStatus::COMPLETING ) {
 				$result = $this->verify_destination( $destination_gateway, $destination_key, $size, $session_uuid, true );
@@ -291,6 +298,26 @@ final class ResumableTransferService {
 					'started_at'             => gmdate( 'Y-m-d H:i:s' ),
 				)
 			);
+			if ( $multipart_created !== null && ! $multipart_created( $upload_id ) ) {
+				$abort_confirmed = true;
+				try {
+					$destination_gateway->abort_multipart_upload( $destination_key, $upload_id );
+				} catch ( \Throwable ) {
+					// The provider outcome is unknown, but this session is no longer
+					// authorized to resume. Keep its exact provider ID and terminal
+					// outcome for cleanup/audit rather than selecting it blindly later.
+					$abort_confirmed = false;
+				}
+				$this->sessions->update(
+					$session_id,
+					array(
+						'status'             => TransferSessionStatus::ABORTED,
+						'last_error_code'    => $abort_confirmed ? 'multipart_authority_rejected' : 'multipart_authority_rejected_abort_unknown',
+						'last_error_message' => $abort_confirmed ? 'Migration multipart authority was rejected and the provider upload was aborted.' : 'Migration multipart authority was rejected; provider abort outcome is unknown.',
+					)
+				);
+				throw new \RuntimeException( 'Migration multipart authority could not be persisted.' );
+			}
 			$completed_parts = array();
 			$this->record_multipart_event(
 				'multipart_started',
@@ -682,7 +709,7 @@ final class ResumableTransferService {
 	}
 
 	private function bounded_message( \Throwable $e ): string {
-		return substr( $e->getMessage(), 0, 500 );
+		return SecretRedactor::redact( $e );
 	}
 
 	/**

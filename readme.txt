@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: 1.2.1
+Stable tag: 1.2.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -174,6 +174,9 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 8. Use Integrity Center to review inventory, verification, recovery, and restore-preflight controls.
 
 == Changelog ==
+
+= 1.2.2 =
+* Release-alignment update for the 1.2.2 Pro add-on release. Free/Core and Pro can now be installed as the same 1.2.2 release pair.
 
 = 1.2.1 =
 * Clarified the Pro Direct Upload image workflow, including its default-off setting and browser CORS requirement.

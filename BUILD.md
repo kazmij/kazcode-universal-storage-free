@@ -32,8 +32,8 @@ the unscoped dev `vendor/`.
 For public releases, first verify the exact Git tag/commit:
 
 ```bash
-VERSION=1.2.1
-TAG=v1.2.1
+VERSION=1.2.2
+TAG=v1.2.2
 COMMIT="$(git rev-parse HEAD)"
 php build/release-integrity.php preflight --source . --version "$VERSION" --tag "$TAG" --commit "$COMMIT"
 ```
@@ -107,7 +107,7 @@ without tripping its separate rule against bundling application files.
 ## Verifying the scoped build yourself
 
 ```bash
-VERSION=1.2.1
+VERSION=1.2.2
 ZIP="dist/kazcode-universal-storage-${VERSION}.zip"
 unzip -l "$ZIP" | head -30   # inspect contents
 unzip -d /tmp/kazus-check "$ZIP"

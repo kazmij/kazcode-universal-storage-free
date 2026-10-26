@@ -142,6 +142,59 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringContainsString('DEXEC_RELEASE', $makefile);
 	}
 
+	public function test_pro_release_sdk_gate_rejects_a_vendored_sdk_older_than_the_latest_stable_version(): void {
+		$script = $this->root . '/build/verify-freemius-sdk.sh';
+		$pro_dir = $this->freemius_sdk_fixture( '2.13.4' );
+		try {
+			$result = $this->run_command(
+				'bash ' . escapeshellarg( $script ) .
+				' --pro-dir ' . escapeshellarg( $pro_dir ) .
+				' --latest-version 999.0.0'
+			);
+
+			self::assertNotSame( 0, $result['code'] );
+			self::assertStringContainsString( 'update the vendored SDK before releasing Pro', $result['output'] );
+		} finally {
+			$this->remove_dir( $pro_dir );
+		}
+	}
+
+	public function test_pro_release_sdk_gate_accepts_the_exact_vendored_sdk_version(): void {
+		$script = $this->root . '/build/verify-freemius-sdk.sh';
+		$pro_dir = $this->freemius_sdk_fixture( '2.13.5' );
+		try {
+			$result = $this->run_command(
+				'bash ' . escapeshellarg( $script ) .
+				' --pro-dir ' . escapeshellarg( $pro_dir ) .
+				' --latest-version 2.13.5'
+			);
+
+			self::assertSame( 0, $result['code'], $result['output'] );
+			self::assertStringContainsString( 'Freemius SDK version verified: 2.13.5', $result['output'] );
+		} finally {
+			$this->remove_dir( $pro_dir );
+		}
+	}
+
+	private function freemius_sdk_fixture( string $version ): string {
+		$dir = sys_get_temp_dir() . '/kazus-freemius-sdk-' . bin2hex( random_bytes( 6 ) );
+		mkdir( $dir . '/vendor/freemius', 0700, true );
+		file_put_contents( $dir . '/vendor/freemius/start.php', "<?php\n" . '$this_sdk_version' . " = '{$version}';\n" );
+
+		return $dir;
+	}
+
+	private function remove_dir( string $dir ): void {
+		if ( ! is_dir( $dir ) ) {
+			return;
+		}
+
+		@unlink( $dir . '/vendor/freemius/start.php' );
+		@rmdir( $dir . '/vendor/freemius' );
+		@rmdir( $dir . '/vendor' );
+		@rmdir( $dir );
+	}
+
 	public function test_release_metadata_allows_free_patch_without_matching_pro_patch(): void {
 		$script = file_get_contents($this->root . '/build/release-metadata.php');
 

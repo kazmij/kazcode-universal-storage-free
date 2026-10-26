@@ -1125,7 +1125,7 @@ final class BatchProcessor {
 			);
 		}
 
-		$tmp = wp_tempnam( 's3ms-profile-test' );
+		$tmp = TemporaryFile::create( 's3ms-profile-test' );
 		if ( $tmp === false ) {
 			$steps[] = array(
 				'name'   => 'upload',

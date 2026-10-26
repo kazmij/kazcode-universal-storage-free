@@ -120,6 +120,9 @@ final class AttachmentOffloader {
 		if (!is_array($metadata) || $attachment_id <= 0) {
 			return $metadata;
 		}
+		if ( $this->is_deferred( $attachment_id ) ) {
+			return $metadata;
+		}
 		// maybe_offload(force: false) no-ops when already offloaded (e.g. regenerating
 		// an S3-only attachment's thumbnails) — captured before the call so we can tell
 		// afterward whether THIS pass actually did the real offload+cleanup work, or
@@ -162,6 +165,9 @@ final class AttachmentOffloader {
 	public function on_update_metadata($metadata, $attachment_id) {
 		$attachment_id = (int) $attachment_id;
 		if (!is_array($metadata) || $attachment_id <= 0) {
+			return $metadata;
+		}
+		if ( $this->is_deferred( $attachment_id ) ) {
 			return $metadata;
 		}
 		if (isset(self::$in_generate[ $attachment_id ])) {
@@ -382,6 +388,15 @@ final class AttachmentOffloader {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $stage is an internal fixed call-site label, then passed through safe_error_message() before any UI display.
 			throw new LeaseLostException( 'Attachment operation ownership lost before ' . $stage . '.' );
 		}
+	}
+
+	/**
+	 * Let an owning workflow fence Core's automatic hooks while it generates
+	 * metadata in a private workspace. The default is deliberately false; Core
+	 * has no dependency on Pro or on any particular deferred workflow.
+	 */
+	private function is_deferred( int $attachment_id ): bool {
+		return (bool) apply_filters( 'kazus_defer_attachment_offload', false, $attachment_id );
 	}
 
 	/**

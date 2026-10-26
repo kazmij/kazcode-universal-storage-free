@@ -10,6 +10,57 @@ commit/tag.
 
 SVN is a publication transport, not the source of truth.
 
+## Operator Commands
+
+Use the repository wrapper rather than exporting SVN credentials by hand. The
+credentials file must be local and untracked, with exactly two non-empty lines:
+the WordPress.org SVN username and then its password. The wrapper reads it only
+for the child command; it does not print it, add it to Git, or pass the password
+as an argument.
+
+```bash
+# First inspect the exact release-to-SVN change; this makes no remote mutation.
+bash kazcode-universal-storage/build/wordpress-org.sh dry-run \
+  --version 1.2.0 --tag v1.2.0 --commit <release-commit>
+
+# Publish the exact tagged release after its release gates are green.
+bash kazcode-universal-storage/build/wordpress-org.sh release \
+  --credentials-file /secure/local/wp-svn \
+  --version 1.2.0 --tag v1.2.0 --commit <release-commit>
+
+# Update only the public listing text after reviewing readme.txt. This cannot
+# create or alter a versioned SVN tag.
+bash kazcode-universal-storage/build/wordpress-org.sh readme \
+  --credentials-file /secure/local/wp-svn --dry-run
+bash kazcode-universal-storage/build/wordpress-org.sh readme \
+  --credentials-file /secure/local/wp-svn
+```
+
+The `readme` command changes only `trunk/readme.txt`, which controls the
+WordPress.org description, FAQ, changelog, and screenshot captions. Review the
+dry-run diff before publishing it. Listing images are maintained separately in
+`kazcode-universal-storage-wporg-assets/screenshots/` and travel in SVN's
+top-level `assets/` directory during a versioned release.
+
+### Required listing refresh for every public release
+
+Before each WordPress.org release, do all of the following as part of the
+release checklist:
+
+1. Review `readme.txt` against the actual shipped features and update the
+   Description, Free/Pro boundary, FAQ, changelog, upgrade notice, and
+   screenshot captions. Never promise an untested workflow.
+2. Capture current, sanitized screenshots from the exact release artifact on
+   a disposable WordPress install. Use the numbered `screenshot-N.png` files
+   in `kazcode-universal-storage-wporg-assets/screenshots/`; do not use mockups
+   or screens containing credentials, bucket names, local paths, or customer
+   content.
+3. Replace listing assets in SVN's top-level `assets/` directory together with
+   the release. Keep `readme.txt` captions synchronized with their sequence.
+4. Run the public-package verification and an end-to-end browser smoke against
+   a real disposable WordPress installation using the downloaded public ZIP.
+   Record the result in the release report before declaring the release done.
+
 Do not release from:
 
 - a dirty working tree;

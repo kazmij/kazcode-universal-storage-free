@@ -12,6 +12,7 @@ namespace Kazcode\WpStorage\Services;
 defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Infrastructure\TemporaryFile;
 use Kazcode\WpStorage\Storage\S3Storage;
 
 /**
@@ -88,7 +89,7 @@ final class ConnectionTestService {
 		}
 
 		$relative = 's3ms-connection-test/' . wp_generate_password(12, false) . '.txt';
-		$tmp      = wp_tempnam('s3ms-test');
+		$tmp      = TemporaryFile::create('s3ms-test');
 		if ($tmp === false) {
 			$steps[] = array(
 				'name'   => 'upload',

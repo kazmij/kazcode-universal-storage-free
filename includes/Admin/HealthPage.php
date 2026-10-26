@@ -155,6 +155,7 @@ final class HealthPage {
 						<button type="button" class="button" id="s3ms-orphan-async"><?php esc_html_e( 'Enqueue async scan', 'kazcode-universal-storage' ); ?></button>
 					</p>
 					<pre id="s3ms-orphan-log" class="s3ms-log" aria-live="polite"></pre>
+					<?php do_action( 'kazus_orphan_quarantine_panel' ); ?>
 				</div>
 			</section>
 			<?php endif; ?>

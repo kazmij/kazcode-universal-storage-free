@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: 1.2.0
+Stable tag: 1.2.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -18,6 +18,18 @@ Upload media normally. KAZCODE can move originals and generated sizes to object 
 
 Reliability is built into the workflow: remote files are verified before destructive cleanup, temporary provider errors are not treated as missing files, and interrupted operations remain recoverable.
 
+= Built for real WordPress media workflows =
+
+WordPress remains the source of truth for attachments, titles, alt text, captions, and generated image sizes. KAZCODE adds storage delivery and recovery controls around that familiar workflow instead of replacing it with a separate media system.
+
+Start with a single test upload, confirm its delivery URL and generated sizes, then offload new or existing media in resumable batches. Each attachment keeps visible storage state in wp-admin, so you can investigate a failure or restore an item without guessing where the file went.
+
+= Safer operations in 1.2.0 =
+
+The Integrity Center gives administrators one place to review inventory health, verify remote objects, retry eligible failures, prepare restores, and understand recovery steps. It is designed to make checks and decisions visible before a destructive action.
+
+Safe Mode protects a shared bucket prefix when a production site is cloned, moved, or opened as staging. It pauses storage writes and local cleanup until an administrator explicitly chooses how the copy should proceed, while normal delivery of already-offloaded media continues.
+
 = What you can do with Free =
 
 * Offload new uploads and existing Media Library files.
@@ -30,6 +42,15 @@ Reliability is built into the workflow: remote files are verified before destruc
 * Use supported admin, WP-CLI, and REST workflows.
 * Configure one primary storage profile.
 
+= Why teams use it =
+
+* Keep the normal WordPress Media Library and editorial workflow.
+* Reduce local disk pressure by moving originals and generated image sizes to object storage.
+* Choose the delivery hostname that fits your S3 bucket, R2 custom domain, or CDN setup.
+* Verify first and clean up only when remote files are confirmed.
+* Recover from interrupted work with resumable operations and clear wp-admin status.
+* Protect shared production storage when working on staging or cloned sites.
+
 = Supported storage =
 
 Free supports Amazon S3, Cloudflare R2, DigitalOcean Spaces, Wasabi, Backblaze B2 S3 API, MinIO, and custom S3-compatible endpoints. [Read the storage provider docs](https://kazcode.net/universal-storage/docs/storage-providers/)
@@ -41,6 +62,15 @@ Already using WP Offload Media, Advanced Media Offloader, or Media Cloud? KAZCOD
 = Moving between storage providers =
 
 Pro is a separate add-on for multiple Storage Profiles and provider-to-provider migration, such as Amazon S3 to Cloudflare R2. Pro keeps the source authoritative until the destination is transferred, verified, and cut over. Optional source deletion is available after verification.
+
+= Direct Upload for image-heavy workflows =
+
+Pro can optionally send JPEG, PNG, and WebP uploads from an administrator's
+browser directly to the selected S3-compatible storage profile. WordPress still
+creates the native attachment metadata and generated image sizes, while KAZCODE
+verifies and inventories every resulting object before the Media Library item is
+ready. Direct Upload is off by default and requires the site's administrator to
+configure the storage provider's browser CORS policy before enabling it.
 
 [View Pro features and pricing](https://kazcode.net/universal-storage/#pricing)
 
@@ -91,7 +121,7 @@ Free includes one storage profile, S3-compatible offload, existing media process
 
 = What does Pro add? =
 
-Pro adds multiple Storage Profiles, provider migration, verified cutover, optional source deletion, advanced health/orphan tools, and network/agency functions. [View Pro features and pricing](https://kazcode.net/universal-storage/#pricing)
+Pro adds multiple Storage Profiles, provider migration, verified cutover, optional source deletion, advanced health/orphan tools, network/agency functions, and optional browser-to-storage Direct Upload for JPEG, PNG, and WebP images. [View Pro features and pricing](https://kazcode.net/universal-storage/#pricing)
 
 = Can I migrate from Amazon S3 to Cloudflare R2? =
 
@@ -140,14 +170,20 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 4. Process existing media in resumable batches with visible progress.
 5. Verify storage health, failed operations, and repair options before cleanup.
 6. Choose a provider, enter credentials, and confirm storage in guided setup.
+7. See the current Dashboard with connection health, offload status, inventory, and recovery activity.
+8. Use Integrity Center to review inventory, verification, recovery, and restore-preflight controls.
 
 == Changelog ==
+
+= 1.2.1 =
+* Clarified the Pro Direct Upload image workflow, including its default-off setting and browser CORS requirement.
 
 = 1.2.0 =
 * Added Integrity Center tools to verify, repair, reconcile, and safely rebuild storage inventory.
 * Added Safe Mode protection for staging and cloned sites that share storage prefixes.
 * Strengthened cloud-only cleanup, restore, delivery, and Media Library reliability.
 * Improved credential redaction and recovery tools while preserving existing settings and media inventory.
+* Expanded the WordPress.org listing with workflow, safety, and recovery guidance.
 
 = 1.1.2 =
 * Fixed Pro storage profile setup so additional profiles can use their own provider credentials.

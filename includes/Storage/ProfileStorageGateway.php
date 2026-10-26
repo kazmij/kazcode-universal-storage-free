@@ -52,6 +52,45 @@ final class ProfileStorageGateway implements PresignedUploadPartStorageGatewayIn
 		return $this->profile->bucket;
 	}
 
+	/**
+	 * List one bounded page of object keys in this exact profile's bucket.
+	 *
+	 * This is intentionally a read-only primitive: callers decide whether a
+	 * listed key is actionable. In particular, it must not be paired with a
+	 * delete operation for orphan reporting.
+	 *
+	 * @return array{keys:list<string>,next_token:?string}
+	 */
+	public function list_keys_page( string $prefix, ?string $continuation_token = null, int $max_keys = 1000 ): array {
+		$params = array(
+			'Bucket'  => $this->bucket(),
+			'Prefix'  => $prefix,
+			'MaxKeys' => max( 1, min( 1000, $max_keys ) ),
+		);
+		if ( $continuation_token !== null && $continuation_token !== '' ) {
+			$params['ContinuationToken'] = $continuation_token;
+		}
+
+		$result = $this->client()->listObjectsV2( $params );
+		$keys   = array();
+		foreach ( $result->get( 'Contents' ) ?? array() as $item ) {
+			if ( ! empty( $item['Key'] ) ) {
+				$keys[] = (string) $item['Key'];
+			}
+		}
+
+		$next = null;
+		if ( (bool) ( $result->get( 'IsTruncated' ) ?? false ) ) {
+			$token = $result->get( 'NextContinuationToken' );
+			$next  = is_string( $token ) && $token !== '' ? $token : null;
+		}
+
+		return array(
+			'keys'       => $keys,
+			'next_token' => $next,
+		);
+	}
+
 	public function put_object_from_file( string $key, string $local_path, string $content_type, string $cache_control ): void {
 		$this->guard_write( 'put_object_from_file' );
 		$params = array(

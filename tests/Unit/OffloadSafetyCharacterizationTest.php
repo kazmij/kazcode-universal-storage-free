@@ -249,6 +249,23 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 		);
 	}
 
+	public function test_explicit_deferred_workflow_blocks_both_metadata_hooks_without_changing_attachment_state(): void {
+		$settings = $this->createMock(Settings::class);
+		$settings->expects($this->never())->method('is_enabled');
+		$storage = $this->createMock(S3Storage::class);
+		$offloader = new AttachmentOffloader($settings, $storage);
+		$id = 913;
+		add_filter('kazus_defer_attachment_offload', static fn( bool $deferred, int $attachment_id ): bool => $attachment_id === 913, 10, 2);
+		try {
+			$metadata = array( 'file' => '2026/10/photo.jpg', 'sizes' => array() );
+			$this->assertSame($metadata, $offloader->on_generate_metadata($metadata, $id));
+			$this->assertSame($metadata, $offloader->on_update_metadata($metadata, $id));
+			$this->assertArrayNotHasKey('_s3ms_status', WpStubs::$post_meta[$id] ?? array());
+		} finally {
+			remove_all_filters('kazus_defer_attachment_offload');
+		}
+	}
+
 	/**
 	 * Regression for a bug introduced — and caught — while fixing the one above: naively
 	 * skipping every paired on_update_metadata() call whenever on_generate_metadata() just

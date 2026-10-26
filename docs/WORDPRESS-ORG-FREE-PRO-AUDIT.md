@@ -38,14 +38,14 @@ exists anywhere in the ZIP (0 matches, verified by direct grep).
 
 | File | Classification | Evidence |
 |---|---|---|
-| `includes/Admin/HealthPage.php` | C | gate deciding whether to render the orphan-scan panel |
+| `includes/Admin/HealthPage.php` | C | gate deciding whether to render the orphan-scan panel; emits a neutral extension hook for a Pro-owned report view |
 | `includes/Core/Features.php` | A | gate-key list |
 | `includes/CLI/CliCommand.php` | C | `ProServices::require('orphan_scan', ...)` — degrades to a friendly WP-CLI error when Pro absent |
 | `includes/Infrastructure/Queue/QueueJobType.php` | A | shared job-type string constant (queue infra is a Core primitive; only Pro registers a handler for it) |
 | `includes/Services/HealthCheckService.php` | C | `ProServices::get('orphan_scan', ...)` — omits the payload key when null |
 | `includes/Infrastructure/BatchProcessor.php` | C | REST route handler, same degrade-to-403 pattern |
 
-No `OrphanScanService` class exists in the ZIP.
+No `OrphanScanService`, `OrphanQuarantineRepository`, `OrphanQuarantineSchemaMigrator`, or `OrphanQuarantinePanel` class exists in the ZIP. The Core `ProfileStorageGateway::list_keys_page()` method is only a profile-scoped, read-only S3 primitive; it has no orphan policy, report storage, UI, or delete operation.
 
 ### `multiple_profiles`
 

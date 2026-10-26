@@ -75,6 +75,59 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringNotContainsString("--password '\${KAZUS_WPORG_PASSWORD}'", $script);
 	}
 
+	public function test_wordpress_org_operator_wrapper_rejects_malformed_credentials_without_invoking_make(): void {
+		$script = $this->root . '/build/wordpress-org.sh';
+		$credentials = tempnam(sys_get_temp_dir(), 'kazus-wporg-credentials-');
+		file_put_contents($credentials, "username-only\n");
+
+		try {
+			$result = $this->run_command('bash ' . escapeshellarg($script) . ' release --credentials-file ' . escapeshellarg($credentials) . ' --version 1.2.0 --tag v1.2.0 --commit deadbeef');
+
+			self::assertNotSame(0, $result['code']);
+			self::assertStringContainsString('exactly two non-empty lines', $result['output']);
+			self::assertStringNotContainsString('make release-wp', $result['output']);
+		} finally {
+			@unlink($credentials);
+		}
+	}
+
+	public function test_wordpress_org_operator_wrapper_has_readme_mode_and_keeps_password_off_the_command_line(): void {
+		$script = $this->root . '/build/wordpress-org.sh';
+		$result = $this->run_command('bash ' . escapeshellarg($script) . ' --help');
+		$source = is_file($script) ? file_get_contents($script) : '';
+
+		self::assertSame(0, $result['code'], $result['output']);
+		self::assertStringContainsString('readme', $result['output']);
+		self::assertStringContainsString('--assets-dir', $result['output']);
+		self::assertStringContainsString('--credentials-file', $result['output']);
+		self::assertIsString($source);
+		self::assertStringContainsString('KAZUS_WPORG_PASSWORD', $source);
+		self::assertStringNotContainsString('--password "${KAZUS_WPORG_PASSWORD}"', $source);
+		self::assertStringContainsString('pwd)/$(basename', $source);
+	}
+
+	public function test_wordpress_org_listing_updater_can_include_reviewed_assets_without_touching_tags(): void {
+		$script = file_get_contents($this->root . '/build/update-wordpress-org-readme.sh');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('--assets-dir', $script);
+		self::assertStringContainsString('svn update --set-depth infinity "${TMP}/svn/assets"', $script);
+		self::assertStringContainsString('rsync -rt --exclude', $script);
+		self::assertStringNotContainsString('/tags/', $script);
+	}
+
+	public function test_makefile_listing_update_does_not_require_composer(): void {
+		$makefile_path = dirname($this->root) . '/Makefile';
+		if (!is_file($makefile_path)) {
+			self::markTestSkipped('Repository Makefile is not available in plugin-only test installs.');
+		}
+
+		$makefile = file_get_contents($makefile_path);
+		self::assertIsString($makefile);
+		self::assertStringContainsString('WPORG_LISTING_DOCKER', $makefile);
+		self::assertStringContainsString('apt-get install -y -qq rsync subversion', $makefile);
+	}
+
 	public function test_makefile_uses_canonical_freemius_script_and_mode_variable(): void {
 		$makefile_path = dirname($this->root) . '/Makefile';
 		if (!is_file($makefile_path)) {
@@ -162,6 +215,26 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringContainsString('ifeq ($(origin CONTAINER),command line)', $makefile);
 		self::assertStringNotContainsString('release-verify-wp: setup', $makefile);
 		self::assertStringNotContainsString("cd $(CORE_DIR) && curl -fsSL \"https://downloads.wordpress.org/plugin/kazcode-universal-storage.$(VERSION).zip\"", $makefile);
+	}
+
+	public function test_makefile_release_mount_root_does_not_require_newer_git_path_format_support(): void {
+		$makefile_path = dirname($this->root) . '/Makefile';
+		if (!is_file($makefile_path)) {
+			self::markTestSkipped('Repository Makefile is not available in plugin-only test installs.');
+		}
+
+		$makefile = file_get_contents($makefile_path);
+
+		self::assertIsString($makefile);
+		self::assertStringContainsString('RELEASE_MOUNT_ROOT := $(shell', $makefile);
+		self::assertStringNotContainsString('rev-parse --path-format=absolute --git-common-dir', $makefile);
+
+		$result = $this->run_command(
+			'make -C ' . escapeshellarg(dirname($this->root)) .
+			' -n release-prepare VERSION=1.2.0 TAG=v1.2.0 COMMIT=release-test COMPOSER_PHAR_SRC=/dev/null'
+		);
+		self::assertSame(0, $result['code'], $result['output']);
+		self::assertStringNotContainsString('Syntax error', $result['output']);
 	}
 
 	public function test_wordpress_release_verifier_supports_explicit_container_without_fixed_plugin_path(): void {

@@ -18,5 +18,6 @@ MANIFEST="$(unzip -Z1 "${ZIP}")" || fail "unable to read Pro ZIP manifest: ${ZIP
 # broken pipe even when the required entry is present. Feed the captured
 # manifest directly so this remains fail-closed without that false failure.
 grep -Fxq "${SLUG}/readme.txt" <<< "${MANIFEST}" || fail "Pro ZIP is missing ${SLUG}/readme.txt"
+grep -Fxq "${SLUG}/vendor/freemius/start.php" <<< "${MANIFEST}" || fail "Pro ZIP is missing runtime Freemius SDK"
 
-echo "OK: Pro ZIP contains ${SLUG}/readme.txt"
+echo "OK: Pro ZIP contains required Freemius runtime files"

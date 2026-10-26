@@ -13,6 +13,7 @@ defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Domain\TransferSessionStatus;
+use Kazcode\WpStorage\Infrastructure\TemporaryFile;
 use Kazcode\WpStorage\Storage\MultipartPlan;
 use Kazcode\WpStorage\Storage\PathGuard;
 use Kazcode\WpStorage\Storage\RetryClassifier;
@@ -464,12 +465,12 @@ final class ResumableTransferService {
 	): void {
 		$body = $source_gateway->get_range( $source_key, 0, max( 0, $size - 1 ) );
 
-		$tmp = wp_tempnam( basename( $destination_key ) );
+		$tmp = TemporaryFile::create( basename( $destination_key ) );
 		if ( ! is_string( $tmp ) || $tmp === '' ) {
 			throw new \RuntimeException( 'Unable to create temporary remote-copy file.' );
 		}
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- temporary file is created by wp_tempnam(); binary stream is required to write an SDK response body before put_object_from_file().
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- temporary file is created by TemporaryFile; binary stream is required to write an SDK response body before put_object_from_file().
 		$out = fopen( $tmp, 'wb' );
 		if ( $out === false ) {
 			throw new \RuntimeException( 'Unable to write temporary remote-copy file.' );
@@ -478,7 +479,7 @@ final class ResumableTransferService {
 		try {
 			$this->write_body_to_stream( $body, $out );
 		} finally {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closes the binary stream opened for the wp_tempnam() file above.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closes the binary stream opened for the temporary file above.
 			fclose( $out );
 			$this->close_body( $body );
 		}

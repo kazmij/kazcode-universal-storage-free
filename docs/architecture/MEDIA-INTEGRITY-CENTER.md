@@ -343,16 +343,11 @@ Acceptable shapes: (a) `MigrationService::restore_batch()` and `AttachmentRestor
 ### 6.5 Orphan reporting (Pro)
 
 - Keep `OrphanScanService` report-only LIST semantics (no remote delete).
-- **Profile-scoped LIST (prerequisite for #29):** today’s `OrphanScanService::scan_page()` loads inventory keys for the selected/default profile ID but performs LIST via legacy site-wide `S3Storage` / Settings credentials. After Pro `switch_default_profile()` to a custom profile/bucket, that can LIST the wrong location. #29 (or a tiny predecessor) must LIST through a **profile-scoped gateway** for the selected profile (or explicitly restrict the Integrity Orphans panel to the legacy profile with a clear warning).
-- **Active ownership for “known keys” (prerequisite for #29):** orphan comparison must not treat **dangling** inventory rows as ownership that suppresses a LIST key. Hazard today: `AttachmentRestorer::on_delete_attachment()` can catch a remote-delete failure and leave `s3ms_objects` rows behind while WordPress still deletes the attachment post; `ObjectRepository::list_known_keys()` currently returns every `object_key` for the profile with **no** check that the owning `attachment_id` still exists / is authoritative. A later orphan LIST then hides exactly those leaked remote keys from quarantine. Before #29 ships, known-key membership must either:
-  - join/filter to **active** attachment ownership (attachment post still exists, and row is current/authoritative — not superseded-only noise unless product policy says otherwise); and/or
-  - run an explicit **dangling-row reconciliation** step (report or purge inventory rows whose attachment is gone) so leaked keys become visible as orphans.
-  Dangling rows must never silently count as “owned” forever.
-- Integrity Orphans panel shows report + “quarantine” (persist report IDs/keys — **no delete**).
+- `OrphanScanService` LISTs through the selected profile's `ProfileStorageGateway`, never the legacy site-wide S3 credentials.
+- Known-key membership joins a live WordPress `attachment` post, so dangling inventory rows never suppress a leaked remote key from the report.
+- Integrity Orphans shows a Pro-owned report/quarantine view with filtering and CSV export. It is review evidence only: there is **no delete** operation.
 - **Operational-report exemption:** Orphan “dry-run” means **no remote mutation**. Persisting resumable scan cursor / quarantine report / audit of the scan is allowed (same narrow exemption class as optional preflight audit) and does **not** violate media zero-mutation. Global “dry-run = zero persistence” applies to rebuild/verify dry-runs; orphan scan already mutates scan-state options today — document that as intentional operational state, not media mutation.
-- **Quarantine persistence invariant (#29):** today’s `OrphanScanService::scan_page()` returns only `array_slice($orphans, 0, 100)` while the S3 continuation token advances across a full LIST page (up to `max_keys`, default 1000). Persisting only the returned slice would silently drop up to ~900 orphans per page. Leaf #29 **must**:
-  - persist the **full** orphan set discovered on each LIST page before advancing the cursor; and/or
-  - change the service so returned orphan keys and page advancement cannot diverge (e.g. `max_keys` aligned with the return cap, or return+persist all orphans on the page under a report ID).
+- **Quarantine persistence invariant (#29):** the REST/queue response still caps its display preview at 100 keys, but `OrphanQuarantineRepository::append_page()` persists the **full** provider page before `s3ms_orphan_scan_state` receives its continuation cursor. The durable report ID is carried in state and queue payloads, so a later page cannot be attached to a different report.
 - Future destructive delete = separate HUMAN-GATE issue.
 
 ### 6.6 Future: metadata / content drift

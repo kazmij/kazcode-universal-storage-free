@@ -103,6 +103,27 @@ run UUIDs used for the run.
 9. Complete a Pro cross-provider migration. Confirm the destination is HEAD-verified and committed before the source becomes `stale`, its URL changes, or source deletion is queued.
 10. Uninstall with preserve selected, then with the opt-in purge setting in a disposable site. Preserve must retain import/transfer recovery tables; purge must remove them. Neither mode may contact remote storage or delete media objects.
 
+## Scenario L — Pro Direct Upload image finalization (not a release substitute)
+
+Use only a disposable Pro site with an explicitly licensed Pro add-on, Direct
+Upload enabled after its CORS acknowledgement, and a test-only storage prefix.
+The complete qualification matrix is
+`docs/testing/DIRECT-UPLOAD-IMAGE-TEST-MATRIX.md`; do not mark the feature
+released from this manual scenario alone.
+
+1. In the Direct Upload screen select a JPG, PNG or WebP that is larger than
+   WordPress's thumbnail threshold and complete the browser upload.
+2. Confirm the session ends at **Ready**, not merely `REMOTE_VERIFIED`.
+3. Open the attachment: dimensions, orientation and generated sizes must be
+   normal WordPress metadata; its `file` value must be under the normal
+   year/month uploads path, never `.kazus-direct-upload`.
+4. Confirm the selected profile contains the staged original and every current
+   derivative; no attachment becomes Ready if any provider HEAD or inventory
+   write fails.
+5. Restore and permanently delete the attachment. Verify that only the owned
+   original and current derivatives are affected.
+6. On a Free-only site confirm the Direct Upload screen/routes are absent.
+
 ## CLI smoke
 
 ```bash

@@ -492,8 +492,12 @@ final class ObjectRepository {
 	 */
 	public function list_known_keys( int $storage_profile_id ): array {
 		global $wpdb;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table, see class docblock.
-		$rows = $wpdb->get_col( $wpdb->prepare( "SELECT object_key FROM {$this->table()} WHERE storage_profile_id = %d", $storage_profile_id ) );
+		// A surviving inventory row alone is not ownership: its attachment may
+		// have been deleted outside the plugin. Joining wp_posts makes such
+		// dangling rows visible to the report-only orphan scan instead of
+		// permanently suppressing the remote key.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned inventory joined to fixed WordPress posts table; dynamic profile is prepared.
+		$rows = $wpdb->get_col( $wpdb->prepare( "SELECT DISTINCT object_row.object_key FROM {$this->table()} AS object_row INNER JOIN {$wpdb->posts} AS attachment ON attachment.ID = object_row.attachment_id WHERE object_row.storage_profile_id = %d AND attachment.post_type = 'attachment' AND object_row.remote_status NOT IN (%s, %s)", $storage_profile_id, ObjectRemoteStatus::STALE, ObjectRemoteStatus::DELETED ) );
 		if ( ! is_array( $rows ) ) {
 			return array();
 		}

@@ -294,6 +294,34 @@ final class ProfileStorageGatewayDownloadTest extends TestCase {
 		$this->assertSame( 'prior', (string) file_get_contents( $dest ) );
 	}
 
+	public function test_list_keys_page_uses_the_selected_profile_bucket_and_bounded_cursor(): void {
+		$client = new FakeDownloadS3Client(
+			static function (): void {
+			}
+		);
+		$client->list_result = new FakeProfileListResult(
+			array(
+				'Contents'              => array( array( 'Key' => 'profile-prefix/a.jpg' ), array( 'Key' => 'profile-prefix/b.jpg' ) ),
+				'IsTruncated'           => true,
+				'NextContinuationToken' => 'next-page',
+			)
+		);
+
+		$result = $this->gateway_with_client( $client )->list_keys_page( 'profile-prefix/', 'previous-page', 5000 );
+
+		$this->assertSame( array( 'profile-prefix/a.jpg', 'profile-prefix/b.jpg' ), $result['keys'] );
+		$this->assertSame( 'next-page', $result['next_token'] );
+		$this->assertSame(
+			array(
+				'Bucket'            => 'profile-bucket',
+				'Prefix'            => 'profile-prefix/',
+				'MaxKeys'           => 1000,
+				'ContinuationToken' => 'previous-page',
+			),
+			$client->calls[0]['params']
+		);
+	}
+
 	private function gateway_with_client( FakeDownloadS3Client $client ): ProfileStorageGateway {
 		$profile = new StorageProfile(
 			42,
@@ -346,6 +374,8 @@ final class FakeDownloadS3Client {
 	/** @var callable(array<string,mixed>):void */
 	private $handler;
 
+	public ?FakeProfileListResult $list_result = null;
+
 	/**
 	 * @param callable(array<string,mixed>):void $handler
 	 */
@@ -363,5 +393,30 @@ final class FakeDownloadS3Client {
 		);
 		( $this->handler )( $params );
 		return new \stdClass();
+	}
+
+	/** @param array<string,mixed> $params */
+	public function listObjectsV2( array $params ): FakeProfileListResult {
+		$this->calls[] = array(
+			'method' => 'listObjectsV2',
+			'params' => $params,
+		);
+		if ( $this->list_result === null ) {
+			throw new \RuntimeException( 'No fake list result configured.' );
+		}
+		return $this->list_result;
+	}
+}
+
+final class FakeProfileListResult {
+	/** @param array<string,mixed> $values */
+	public function __construct( private array $values ) {}
+
+	public function get( string $key ): mixed {
+		return $this->values[ $key ] ?? null;
+	}
+
+	public function offsetGet( string $key ): mixed {
+		return $this->values[ $key ] ?? null;
 	}
 }

@@ -59,6 +59,110 @@ final class ProfileDeliveryUrlResolver {
 	}
 
 	/**
+	 * Whether Verify has independently confirmed this exact attachment variant.
+	 *
+	 * Partial attachments are deliberately stricter than fully offloaded ones:
+	 * delivery may use only an inventory row whose own remote status is present.
+	 * A present original must never make a missing thumbnail (or vice versa)
+	 * eligible for a remote URL.
+	 */
+	public function has_present_attachment_relative( int $attachment_id, string $relative_path ): bool {
+		$relative = trim( str_replace( '\\', '/', $relative_path ), '/' );
+		return $relative !== '' && $this->find_present_row_for_relative( $attachment_id, $relative ) !== null;
+	}
+
+	/**
+	 * Return an attachment only after a delivery URL has been proven against the
+	 * current profile-bound inventory. The first implementation deliberately
+	 * fails closed; the lookup rules are added with their own regression tests.
+	 */
+	public function attachment_id_for_delivery_url( string $url ): int {
+		$url = trim( $url );
+		if ( $url === '' ) {
+			return 0;
+		}
+
+		$candidates = array();
+		foreach ( $this->profiles->all() as $profile ) {
+			if ( ! $profile instanceof StorageProfile || $profile->id === null || $profile->delivery_type !== 'cdn' ) {
+				continue;
+			}
+			$relative = $this->cdn_relative_from_delivery_url( $profile, $url );
+			if ( $relative === '' ) {
+				continue;
+			}
+			foreach ( $this->objects->find_present_by_profile_and_local_relative( (int) $profile->id, $relative ) as $row ) {
+				if ( (string) ( $row['remote_status'] ?? '' ) !== ObjectRemoteStatus::PRESENT ) {
+					continue;
+				}
+				$expected = $this->url_for_profile_key( $profile, (string) ( $row['object_key'] ?? '' ), $relative );
+				if ( $expected === '' || ! $this->delivery_urls_match( $expected, $url ) ) {
+					continue;
+				}
+				$id = (int) ( $row['attachment_id'] ?? 0 );
+				if ( $id > 0 ) {
+					$candidates[ $id ] = true;
+				}
+			}
+		}
+
+		return count( $candidates ) === 1 ? (int) array_key_first( $candidates ) : 0;
+	}
+
+	private function cdn_relative_from_delivery_url( StorageProfile $profile, string $url ): string {
+		$base = $this->url_parts_without_query_or_fragment( $profile->delivery_base_url );
+		$target = $this->url_parts_without_query_or_fragment( $url );
+		if ( $base === null || $target === null || $base['host'] !== $target['host'] || ( $base['port'] !== null && $base['port'] !== $target['port'] ) ) {
+			return '';
+		}
+		$base_path = rtrim( $base['path'], '/' );
+		$path = $target['path'];
+		if ( $base_path !== '' && ! str_starts_with( $path . '/', $base_path . '/' ) ) {
+			return '';
+		}
+		$relative = ltrim( substr( $path, strlen( $base_path ) ), '/' );
+		if ( $relative === '' ) {
+			return '';
+		}
+		if ( $profile->cdn_includes_prefix ) {
+			$prefix = trim( str_replace( '\\', '/', $profile->prefix ), '/' );
+			if ( $prefix === '' || ! str_starts_with( $relative . '/', $prefix . '/' ) ) {
+				return '';
+			}
+			$relative = ltrim( substr( $relative, strlen( $prefix ) ), '/' );
+		}
+		return $relative === '' ? '' : rawurldecode( $relative );
+	}
+
+	/** @return array{host:string,port:?int,path:string}|null */
+	private function url_parts_without_query_or_fragment( string $url ): ?array {
+		// rawurldecode() leaves malformed escapes unchanged. Without this guard a
+		// literal inventory path containing '%' could make a malformed external
+		// URL look like its encoded delivery URL, which violates fail-closed
+		// ownership resolution.
+		if ( preg_match( '/%(?![0-9A-Fa-f]{2})/', $url ) ) {
+			return null;
+		}
+		// Unit/runtime consumers outside a fully loaded WordPress request retain
+		// the same URL grammar while WordPress requests use its parser.
+		$parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $url ) : parse_url( $url );
+		if ( ! is_array( $parts ) || empty( $parts['host'] ) ) {
+			return null;
+		}
+		return array(
+			'host' => strtolower( (string) $parts['host'] ),
+			'port' => isset( $parts['port'] ) ? (int) $parts['port'] : null,
+			'path' => '/' . ltrim( rawurldecode( (string) ( $parts['path'] ?? '' ) ), '/' ),
+		);
+	}
+
+	private function delivery_urls_match( string $expected, string $actual ): bool {
+		$expected_parts = $this->url_parts_without_query_or_fragment( $expected );
+		$actual_parts   = $this->url_parts_without_query_or_fragment( $actual );
+		return $expected_parts !== null && $actual_parts !== null && $expected_parts === $actual_parts;
+	}
+
+	/**
 	 * A migration (or crop/regenerate) leaves the superseded row behind as `stale`
 	 * rather than deleting it, so the same relative path can match more than one
 	 * row — e.g. one `stale` row still on the old profile plus one `present` row
@@ -85,6 +189,19 @@ final class ProfileDeliveryUrlResolver {
 			}
 		}
 		return $fallback;
+	}
+
+	/**
+	 * @return array<string, mixed>|null
+	 */
+	private function find_present_row_for_relative( int $attachment_id, string $relative ): ?array {
+		foreach ( $this->objects->find_by_attachment( $attachment_id ) as $row ) {
+			$row_rel = trim( str_replace( '\\', '/', (string) ( $row['local_relative_path'] ?? '' ) ), '/' );
+			if ( $row_rel === $relative && (string) ( $row['remote_status'] ?? '' ) === ObjectRemoteStatus::PRESENT ) {
+				return $row;
+			}
+		}
+		return null;
 	}
 
 	public function url_for_profile_key( StorageProfile $profile, string $object_key, string $relative = '' ): string {

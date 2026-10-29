@@ -29,9 +29,14 @@ namespace Kazcode\WpStorage\Tests {
 	use Kazcode\WpStorage\Attachment\AttachmentUrlFilter;
 	use Kazcode\WpStorage\Attachment\AttachmentOffloader;
 	use Kazcode\WpStorage\Core\Settings;
+	use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
+	use Kazcode\WpStorage\Domain\StorageProfile;
+	use Kazcode\WpStorage\Infrastructure\ObjectRepository;
+	use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
 	use Kazcode\WpStorage\Storage\ProfileDeliveryUrlResolver;
 	use Kazcode\WpStorage\Storage\PublicUrlResolver;
 	use Kazcode\WpStorage\Storage\S3KeyResolver;
+	use Kazcode\WpStorage\Storage\S3Storage;
 	use Kazcode\WpStorage\Tests\Support\WpStubs;
 	use PHPUnit\Framework\TestCase;
 
@@ -67,6 +72,54 @@ namespace Kazcode\WpStorage\Tests {
 
 			$this->assertSame( $response, $result );
 			$this->assertSame( 'http://minio-loopback/example', $result->get_data()['source_url'] );
+		}
+
+		public function test_reverse_lookup_preserves_a_core_attachment_match(): void {
+			$profiles = $this->createMock( ProfileDeliveryUrlResolver::class );
+			$profiles->expects( $this->never() )->method( 'attachment_id_for_delivery_url' );
+			$filter = new AttachmentUrlFilter(
+				$this->createMock( Settings::class ),
+				$this->createMock( PublicUrlResolver::class ),
+				$this->createMock( S3KeyResolver::class ),
+				null,
+				$profiles
+			);
+
+			$this->assertSame( 88, $filter->filter_attachment_url_to_postid( 88, 'https://media.example.test/2026/10/photo.jpg' ) );
+		}
+
+		public function test_reverse_lookup_returns_the_single_profile_proven_owner(): void {
+			$profiles = $this->createMock( ProfileDeliveryUrlResolver::class );
+			$profiles->expects( $this->once() )
+				->method( 'attachment_id_for_delivery_url' )
+				->with( 'https://media.example.test/2026/10/photo.jpg' )
+				->willReturn( 89 );
+			$filter = new AttachmentUrlFilter(
+				$this->createMock( Settings::class ),
+				$this->createMock( PublicUrlResolver::class ),
+				$this->createMock( S3KeyResolver::class ),
+				null,
+				$profiles
+			);
+
+			$this->assertSame( 89, $filter->filter_attachment_url_to_postid( 0, 'https://media.example.test/2026/10/photo.jpg' ) );
+		}
+
+		public function test_reverse_lookup_accepts_wordpress_null_miss_value(): void {
+			$resolver = $this->createMock( ProfileDeliveryUrlResolver::class );
+			$resolver->expects( $this->once() )
+				->method( 'attachment_id_for_delivery_url' )
+				->with( 'https://media.example.test/2026/10/photo.jpg' )
+				->willReturn( 90 );
+			$filter = new AttachmentUrlFilter(
+				$this->createMock( Settings::class ),
+				$this->createMock( PublicUrlResolver::class ),
+				$this->createMock( S3KeyResolver::class ),
+				null,
+				$resolver
+			);
+
+			$this->assertSame( 90, $filter->filter_attachment_url_to_postid( null, 'https://media.example.test/2026/10/photo.jpg' ) );
 		}
 
 		/**
@@ -256,6 +309,156 @@ namespace Kazcode\WpStorage\Tests {
 			$this->assertSame( $local, $filter->filter_content_img_tag( $local, 'the_content', 0 ) );
 		}
 
+		/**
+		 * #152: Verify may mark the original missing while a generated size remains
+		 * size-verified in storage. The generated size must keep its delivery URL,
+		 * otherwise a cloud-only site falls back to bytes that cleanup removed.
+		 */
+		public function test_partial_attachment_keeps_present_generated_size_remote_when_original_is_missing(): void {
+			WpStubs::$post_meta[85] = array(
+				'_s3ms_status'            => 'partial',
+				'_wp_attached_file'       => '2026/10/partial-photo.jpg',
+				'_wp_attachment_metadata' => array(
+					'sizes' => array(
+						'medium' => array( 'file' => 'partial-photo-300x200.jpg', 'width' => 300, 'height' => 200 ),
+					),
+				),
+			);
+
+			$result = $this->partial_filter(
+				85,
+				array(
+					array( 'local_relative_path' => '2026/10/partial-photo.jpg', 'object_key' => 'uploads/2026/10/partial-photo.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::MISSING ),
+					array( 'local_relative_path' => '2026/10/partial-photo-300x200.jpg', 'object_key' => 'uploads/2026/10/partial-photo-300x200.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::PRESENT ),
+				)
+			)->filter_image_src(
+				array( 'http://example.test/uploads/2026/10/partial-photo-300x200.jpg', 300, 200, true ),
+				85,
+				'medium',
+				false
+			);
+
+			$this->assertSame( 'https://delivery.example/uploads/2026/10/partial-photo-300x200.jpg', $result[0] );
+		}
+
+		/**
+		 * #152: a missing generated size must not prevent its independently present
+		 * original from being served remotely, while the missing size remains local
+		 * for Integrity to report instead of being falsely claimed as deliverable.
+		 */
+		public function test_partial_attachment_keeps_present_original_remote_when_generated_size_is_missing(): void {
+			WpStubs::$post_meta[86] = array(
+				'_s3ms_status'            => 'partial',
+				'_wp_attached_file'       => '2026/10/partial-original.jpg',
+				'_wp_attachment_metadata' => array(
+					'sizes' => array(
+						'medium' => array( 'file' => 'partial-original-300x200.jpg', 'width' => 300, 'height' => 200 ),
+					),
+				),
+			);
+
+			$result = $this->partial_filter(
+				86,
+				array(
+					array( 'local_relative_path' => '2026/10/partial-original.jpg', 'object_key' => 'uploads/2026/10/partial-original.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::PRESENT ),
+					array( 'local_relative_path' => '2026/10/partial-original-300x200.jpg', 'object_key' => 'uploads/2026/10/partial-original-300x200.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::MISSING ),
+				)
+			)->filter_prepare_for_js(
+				array(
+					'url' => 'http://example.test/uploads/2026/10/partial-original.jpg',
+					'sizes' => array(
+						'medium' => array( 'url' => 'http://example.test/uploads/2026/10/partial-original-300x200.jpg' ),
+					),
+				),
+				new \WP_Post( 86 ),
+				null
+			);
+
+			$this->assertSame( 'https://delivery.example/uploads/2026/10/partial-original.jpg', $result['url'] );
+			$this->assertSame( 'http://example.test/uploads/2026/10/partial-original-300x200.jpg', $result['sizes']['medium']['url'] );
+		}
+
+		/**
+		 * WordPress may derive a size from the remote original before our image
+		 * filter runs. A missing partial size must put that inherited URL back to
+		 * the canonical uploads URL rather than silently retaining it.
+		 */
+		public function test_partial_missing_size_reverts_an_inherited_remote_image_url_to_uploads_url(): void {
+			WpStubs::$post_meta[88] = array(
+				'_s3ms_status'            => 'partial',
+				'_wp_attached_file'       => '2026/10/inherited-original.jpg',
+				'_wp_attachment_metadata' => array(
+					'sizes' => array(
+						'medium' => array( 'file' => 'inherited-original-300x200.jpg', 'width' => 300, 'height' => 200 ),
+					),
+				),
+			);
+			$filter = $this->partial_filter(
+				88,
+				array(
+					array( 'local_relative_path' => '2026/10/inherited-original.jpg', 'object_key' => 'uploads/2026/10/inherited-original.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::PRESENT ),
+					array( 'local_relative_path' => '2026/10/inherited-original-300x200.jpg', 'object_key' => 'uploads/2026/10/inherited-original-300x200.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::MISSING ),
+				)
+			);
+
+			$result = $filter->filter_image_src(
+				array( 'https://delivery.example/uploads/2026/10/inherited-original-300x200.jpg', 300, 200, true ),
+				88,
+				'medium',
+				false
+			);
+
+			$this->assertSame( 'http://example.test/uploads/2026/10/inherited-original-300x200.jpg', $result[0] );
+		}
+
+		/**
+		 * Partial delivery must apply the same exact-row safety rule before creating
+		 * a private signed URL. A missing sibling may not receive a signed URL.
+		 */
+		public function test_partial_attachment_uses_signed_url_only_for_its_present_variant(): void {
+			WpStubs::$post_meta[87] = array(
+				'_s3ms_status'      => 'partial',
+				'_wp_attached_file' => '2026/10/private-original.jpg',
+				'_wp_attachment_metadata' => array(
+					'sizes' => array(
+						'medium' => array( 'file' => 'private-original-300x200.jpg', 'width' => 300, 'height' => 200 ),
+					),
+				),
+			);
+
+			$settings = $this->createMock( Settings::class );
+			$settings->method( 'is_serve_enabled' )->willReturn( true );
+			$settings->method( 'is_private_media' )->willReturn( true );
+			$settings->method( 'signed_url_ttl' )->willReturn( 900 );
+			$storage = $this->createMock( S3Storage::class );
+			$storage->expects( $this->once() )
+				->method( 'presigned_url_for_relative' )
+				->with( '2026/10/private-original.jpg', 900 )
+				->willReturn( 'https://private.example/signed-original' );
+
+			$filter = $this->partial_filter(
+				87,
+				array(
+					array( 'local_relative_path' => '2026/10/private-original.jpg', 'object_key' => 'uploads/2026/10/private-original.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::PRESENT ),
+					array( 'local_relative_path' => '2026/10/private-original-300x200.jpg', 'object_key' => 'uploads/2026/10/private-original-300x200.jpg', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::MISSING ),
+				),
+				$settings,
+				$storage
+			);
+
+			$this->assertSame( 'https://private.example/signed-original', $filter->filter_attachment_url( 'http://example.test/uploads/2026/10/private-original.jpg', 87 ) );
+			$this->assertSame(
+				'http://example.test/uploads/2026/10/private-original-300x200.jpg',
+				$filter->filter_image_src(
+					array( 'https://private.example/signed-stale-size', 300, 200, true ),
+					87,
+					'medium',
+					false
+				)[0],
+				'A missing sibling must never be presigned.'
+			);
+		}
+
 		private function filter(): AttachmentUrlFilter {
 			$settings = $this->createMock( Settings::class );
 			$settings->method( 'is_serve_enabled' )->willReturn( true );
@@ -273,6 +476,30 @@ namespace Kazcode\WpStorage\Tests {
 				new S3KeyResolver( $settings ),
 				null,
 				$profiles
+			);
+		}
+
+		/**
+		 * @param list<array<string, mixed>> $rows
+		 */
+		private function partial_filter( int $attachment_id, array $rows, ?Settings $settings = null, ?S3Storage $storage = null ): AttachmentUrlFilter {
+			$settings ??= $this->createMock( Settings::class );
+			$settings->method( 'is_serve_enabled' )->willReturn( true );
+			$settings->method( 'has_public_url_config' )->willReturn( true );
+
+			$objects = $this->createMock( ObjectRepository::class );
+			$objects->method( 'find_by_attachment' )->with( $attachment_id )->willReturn( $rows );
+			$profiles = $this->createMock( WpdbStorageProfileRepository::class );
+			$profiles->method( 'find' )->with( 8 )->willReturn(
+				new StorageProfile( 8, 'p8', 'Delivery', 'aws', 'bucket', 'us-east-1', '', false, 'uploads/', 'cdn', 'https://delivery.example', true, 'keys', 'ref', true, false, false, '', '' )
+			);
+
+			return new AttachmentUrlFilter(
+				$settings,
+				$this->createMock( PublicUrlResolver::class ),
+				new S3KeyResolver( $settings ),
+				$storage,
+				new ProfileDeliveryUrlResolver( $objects, $profiles )
 			);
 		}
 	}

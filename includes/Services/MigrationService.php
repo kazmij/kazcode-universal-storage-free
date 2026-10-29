@@ -291,6 +291,7 @@ final class MigrationService {
 				'fields'         => 'ids',
 				'orderby'        => 'ID',
 				'order'          => 'ASC',
+				'no_found_rows'  => true,
 				'meta_query'     => array(
 					array(
 						'key'   => '_s3ms_status',
@@ -350,6 +351,7 @@ final class MigrationService {
 				'meta_value'     => AttachmentOffloader::STATUS_OFFLOADED,
 				'orderby'        => 'ID',
 				'order'          => 'ASC',
+				'no_found_rows'  => true,
 			);
 			if ($after_id > 0) {
 				$where = static function (string $where) use ($after_id): string {

@@ -70,12 +70,16 @@ final class IntegrityPage {
 			);
 			AdminLayout::subnav( AdminMenu::INTEGRITY_SLUG );
 			?>
+			<?php AdminLayout::tour_replay_button( 2 ); ?>
 			<nav class="nav-tab-wrapper" aria-label="<?php esc_attr_e( 'Integrity sections', 'kazcode-universal-storage' ); ?>">
 				<?php foreach ( $this->tab_labels() as $key => $label ) : ?>
 					<a class="nav-tab<?php echo $key === $tab ? ' nav-tab-active' : ''; ?>" href="<?php echo esc_url( self::url( $key ) ); ?>" data-integrity-tab="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $label ); ?></a>
 				<?php endforeach; ?>
 			</nav>
-			<section class="s3ms-card" data-integrity-panel="<?php echo esc_attr( $tab ); ?>">
+			<section class="s3ms-card" data-integrity-panel="<?php echo esc_attr( $tab ); ?>"
+				data-s3ms-tour-step="1"
+				data-s3ms-tour-title="<?php esc_attr_e( 'Check and recover your media safely', 'kazcode-universal-storage' ); ?>"
+				data-s3ms-tour-text="<?php esc_attr_e( 'Use these sections to verify stored objects, review delivery drift, and start recovery from a dry run. Opening this page never changes storage.', 'kazcode-universal-storage' ); ?>">
 				<?php
 				if ( $tab === 'overview' ) {
 					$this->render_overview();

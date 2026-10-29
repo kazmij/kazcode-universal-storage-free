@@ -89,9 +89,13 @@ return array(
 			if ( substr( $filePath, -strlen( '/aws/aws-sdk-php/src/Signature/SignatureV4.php' ) ) !== '/aws/aws-sdk-php/src/Signature/SignatureV4.php' ) {
 				return $contents;
 			}
+			// The source file is PHP source, so PHP-Scoper has doubled every
+			// backslash in the string literal.  Match source text, not the value
+			// that PHP would evaluate at runtime.
+			$escaped_prefix = str_replace( '\\', '\\\\', $prefix );
 			return str_replace(
-				"'" . $prefix . '\\Ymd\\THis\\Z' . "'",
-				"'Ymd\\THis\\Z'",
+				"'" . $escaped_prefix . '\\\\Ymd\\\\THis\\\\Z' . "'",
+				"'Ymd\\\\THis\\\\Z'",
 				$contents
 			);
 		},

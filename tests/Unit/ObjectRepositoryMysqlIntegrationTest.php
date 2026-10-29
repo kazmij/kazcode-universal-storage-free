@@ -111,6 +111,16 @@ namespace Kazcode\WpStorage\Tests {
 			$this->assertSame( 2, $repo->total_count() );
 		}
 
+		public function test_v12_upgrade_adds_delivery_reverse_lookup_index_to_existing_objects_table(): void {
+			$this->create_public_v2_objects_table();
+			WpStubs::$options[ SchemaMigrator::OPTION_KEY ] = 11;
+
+			( new SchemaMigrator() )->maybe_upgrade();
+
+			$this->assertTrue( $this->index_exists( 'profile_relative_status' ) );
+			$this->assertSame( SchemaMigrator::VERSION, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
+		}
+
 		public function test_finalization_intent_and_cleanup_settle_atomically_without_touching_an_unrelated_marker(): void {
 			( new SchemaMigrator() )->maybe_upgrade();
 			$binding = array( 'version' => 1, 'attachment_id' => 999, 'blog_id' => 1, 'owner_uuid' => 'session-999', 'path_reservation_id' => 991, 'key_reservation_id' => 992, 'relative_path' => '2026/10/archive.zip', 'profile_id' => 9, 'object_key' => 'private/direct-upload/session-999/archive.zip', 'profile_fingerprint' => 'fingerprint-999' );

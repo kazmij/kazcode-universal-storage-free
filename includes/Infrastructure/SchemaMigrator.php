@@ -17,7 +17,7 @@ defined( 'ABSPATH' ) || exit;
 final class SchemaMigrator {
 
 	public const OPTION_KEY = 's3ms_schema_version';
-	public const VERSION    = 11;
+	public const VERSION    = 12;
 
 	/**
 	 * Run pending schema upgrades.
@@ -70,6 +70,7 @@ final class SchemaMigrator {
 		if ( $current < 9 ) { $this->install_v9(); $current = 9; update_option( self::OPTION_KEY, $current, false ); }
 		if ( $current < 10 ) { $this->install_v10(); $current = 10; update_option( self::OPTION_KEY, $current, false ); }
 		if ( $current < 11 ) { $this->install_v11(); $current = 11; update_option( self::OPTION_KEY, $current, false ); }
+		if ( $current < 12 ) { $this->install_v12(); $current = 12; update_option( self::OPTION_KEY, $current, false ); }
 	}
 
 	/**
@@ -139,7 +140,8 @@ final class SchemaMigrator {
 			KEY remote_status (remote_status),
 			KEY updated_at (updated_at),
 			KEY attachment_remote (attachment_id, remote_status),
-			KEY profile_attachment (storage_profile_id, attachment_id)
+			KEY profile_attachment (storage_profile_id, attachment_id),
+			KEY profile_relative_status (storage_profile_id, local_relative_path(191), remote_status)
 		) {$charset};";
 
 		\dbDelta( $sql_profiles );
@@ -178,6 +180,20 @@ final class SchemaMigrator {
 
 		$this->drop_index_if_exists( $objects, 'profile_object_key' );
 		$this->add_unique_index_if_missing( $objects, 'profile_object_key_hash', 'storage_profile_id, object_key_hash' );
+	}
+
+	/**
+	 * Add the lookup index used by fail-closed custom delivery URL inversion.
+	 *
+	 * The path uses a 191-character prefix to remain valid for older utf8mb4
+	 * InnoDB installations; profile and status still narrow the candidate set
+	 * before the exact binary path comparison.
+	 */
+	private function install_v12(): void {
+		global $wpdb;
+
+		$objects = $wpdb->prefix . 's3ms_objects';
+		$this->add_index_if_missing( $objects, 'profile_relative_status', 'storage_profile_id, local_relative_path(191), remote_status' );
 	}
 
 	/**
@@ -629,6 +645,22 @@ final class SchemaMigrator {
 		$result = $wpdb->query( "ALTER TABLE {$table} ADD UNIQUE KEY {$index_name} ({$columns})" );
 		if ( $result === false ) {
 			throw new \RuntimeException( 'Unable to add s3ms_objects unique index.' );
+		}
+	}
+
+	private function add_index_if_missing( string $table, string $index_name, string $columns ): void {
+		global $wpdb;
+
+		// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned schema inspection.
+		$exists = $wpdb->get_var( $wpdb->prepare( "SHOW INDEX FROM {$table} WHERE Key_name = %s", $index_name ) );
+		if ( $exists ) {
+			return;
+		}
+
+		// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- versioned plugin-owned schema migration.
+		$result = $wpdb->query( "ALTER TABLE {$table} ADD KEY {$index_name} ({$columns})" );
+		if ( $result === false ) {
+			throw new \RuntimeException( 'Unable to add s3ms_objects delivery reverse-lookup index.' );
 		}
 	}
 

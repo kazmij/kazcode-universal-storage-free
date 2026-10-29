@@ -35,7 +35,26 @@ final class SettingsPage {
 	public function register(): void {
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue' ) );
+		add_filter( 'admin_body_class', array( $this, 'admin_body_class' ) );
 		add_action( 'wp_ajax_kazus_test_connection', array( $this, 'ajax_test_connection' ) );
+	}
+
+	/**
+	 * Add a stable scope for the shared Free/Pro admin chrome.
+	 *
+	 * Freemius renders its notices outside the plugin page markup. A body scope
+	 * lets the shared stylesheet make those notices compact without changing
+	 * WordPress core notices or unrelated wp-admin screens.
+	 *
+	 * @param string $classes Existing body classes.
+	 * @return string
+	 */
+	public function admin_body_class( string $classes ): string {
+		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+		if ( $screen && ( strpos( (string) $screen->id, 'kazcode-universal-storage' ) !== false || 'upload' === $screen->base ) ) {
+			$classes .= ' kazus-admin-shell';
+		}
+		return $classes;
 	}
 
 	/**

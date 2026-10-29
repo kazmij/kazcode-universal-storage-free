@@ -455,6 +455,20 @@ final class AttachmentRestorerTest extends TestCase {
 		$this->assertNotSame( '', get_post_meta( $id, '_s3ms_direct_upload_reservation_binding', true ) );
 	}
 
+	public function test_direct_upload_cleanup_is_not_blocked_by_legacy_offload_toggle(): void {
+		$id = 57;
+		$this->seed_finalization_intent_with_partial_cleanup_evidence( $id, 'location' );
+		$profile_ops = $this->direct_upload_delete_profile_ops( 7, 'profile-7/2026/08/photo.jpg', 'profile-fingerprint' );
+		$cleanup = new class {
+			public function record( array $binding, string $proof ): array { return array( 'id' => 57 ); }
+			public function remote_deleted( int $id ): bool { return true; }
+			public function ready( int $id ): bool { return true; }
+			public function complete( int $id ): bool { return true; }
+		};
+
+		$this->restorer_for_durable_intent_delete( $profile_ops, $cleanup, false )->on_delete_attachment( $id );
+	}
+
 	public function test_delete_recovers_missing_location_from_durable_finalization_intent_after_binding_is_published(): void {
 		$id = 53;
 		$this->seed_finalization_intent_with_partial_cleanup_evidence( $id, 'binding' );
@@ -671,9 +685,9 @@ final class AttachmentRestorerTest extends TestCase {
 		return $profile_ops;
 	}
 
-	private function restorer_for_durable_intent_delete( ProfileAwareObjectOperations $profile_ops, object $cleanup ): AttachmentRestorer {
+	private function restorer_for_durable_intent_delete( ProfileAwareObjectOperations $profile_ops, object $cleanup, bool $enabled = true ): AttachmentRestorer {
 		$settings = $this->createMock( Settings::class );
-		$settings->method( 'is_enabled' )->willReturn( true );
+		$settings->method( 'is_enabled' )->willReturn( $enabled );
 		$settings->method( 'should_delete_remote' )->willReturn( true );
 		$settings->method( 'is_aws_configured' )->willReturn( false );
 		$storage = $this->createMock( S3Storage::class );

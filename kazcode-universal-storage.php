@@ -3,9 +3,9 @@
  * Plugin Name:       KAZCODE Universal Storage
  * Plugin URI:        https://kazcode.net/universal-storage/
  * Description:       Offload your WordPress Media Library to Amazon S3, Cloudflare R2, or S3-compatible object storage while keeping the native Media Library UX and attachment metadata in WordPress.
- * Version:           1.2.5
+ * Version:           1.3.0
  * Requires at least: 6.7
- * Requires PHP:      8.3
+ * Requires PHP:      8.1
  * Author:            KAZCODE
  * Author URI:        https://kazcode.net/
  * License:           GPL-2.0-or-later
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-define('KAZUS_VERSION', '1.2.5');
+define('KAZUS_VERSION', '1.3.0');
 define('KAZUS_PLUGIN_FILE', __FILE__);
 define('KAZUS_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('KAZUS_PLUGIN_URL', plugin_dir_url(__FILE__));

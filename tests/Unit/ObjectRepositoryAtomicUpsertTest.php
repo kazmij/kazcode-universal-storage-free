@@ -44,6 +44,16 @@ final class ObjectRepositoryAtomicUpsertTest extends TestCase {
 		$this->assertStringContainsString( 'DROP INDEX', $source );
 	}
 
+	public function test_schema_indexes_profile_relative_status_for_delivery_reverse_lookup(): void {
+		$source = (string) file_get_contents( dirname( __DIR__, 2 ) . '/includes/Infrastructure/SchemaMigrator.php' );
+
+		$this->assertGreaterThanOrEqual( 12, SchemaMigrator::VERSION );
+		$this->assertStringContainsString(
+			'KEY profile_relative_status (storage_profile_id, local_relative_path(191), remote_status)',
+			$source
+		);
+	}
+
 	public function test_upsert_inserts_atomically_without_preselect(): void {
 		$wpdb = new AtomicUpsertWpdbFake();
 		$GLOBALS['wpdb'] = $wpdb;

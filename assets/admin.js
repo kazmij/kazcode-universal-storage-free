@@ -1165,10 +1165,19 @@
 
 		function positionTooltip(target) {
 			var rect = target.getBoundingClientRect();
-			var top = rect.bottom + window.scrollY + 12;
-			var left = Math.min(rect.left + window.scrollX, window.innerWidth - 340);
+			var padding = 16;
+			var top = rect.bottom + 12;
+			var left = rect.left;
+			var maxTop = Math.max(padding, window.innerHeight - tooltip.offsetHeight - padding);
+			var maxLeft = Math.max(padding, window.innerWidth - tooltip.offsetWidth - padding);
+
+			// The overlay is position: fixed, so these must be viewport coordinates.
+			// Adding scrollY/scrollX put the close button off-screen after Health (or
+			// any long screen) scrolled its highlighted card into view.
+			top = Math.min(Math.max(padding, top), maxTop);
+			left = Math.min(Math.max(padding, left), maxLeft);
 			tooltip.style.top = top + 'px';
-			tooltip.style.left = Math.max(16, left) + 'px';
+			tooltip.style.left = left + 'px';
 		}
 
 		function renderStep() {
@@ -1243,10 +1252,13 @@
 			root.className = 's3ms-tour-overlay';
 			tooltip = document.createElement('div');
 			tooltip.className = 's3ms-tour-tooltip';
+			tooltip.setAttribute('role', 'dialog');
+			tooltip.setAttribute('aria-label', 'Universal Storage tutorial');
 			root.appendChild(tooltip);
 			document.body.appendChild(root);
 			current = 0;
 			renderStep();
+			tooltip.querySelector('[data-tour-close]').focus();
 		}
 
 		var replayBtn = document.getElementById('s3ms-tour-replay');
@@ -1256,9 +1268,9 @@
 			});
 		}
 
-		if (window.s3msTour && !window.s3msTour.dismissed) {
-			window.setTimeout(startTour, 500);
-		}
+		// Tutorials are deliberately opt-in. A new administrator must be able to
+		// navigate every product page without an overlay appearing; the visible
+		// "Show tutorial" control above is the only way to start one.
 	})();
 
 	// --- Pro info modal -----------------------------------------------------

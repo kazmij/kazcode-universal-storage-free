@@ -46,6 +46,23 @@ final class ObjectRepository {
 	}
 
 	/**
+	 * Return only verified-current rows for one profile and canonical uploads
+	 * relative path. Reverse delivery lookup must never use an uploading, stale,
+	 * failed, or missing row as identity evidence.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function find_present_by_profile_and_local_relative( int $storage_profile_id, string $relative_path ): array {
+		if ( $storage_profile_id < 1 || $relative_path === '' ) {
+			return array();
+		}
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- exact lookup against plugin-owned inventory.
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$this->table()} WHERE storage_profile_id = %d AND BINARY local_relative_path = BINARY %s AND remote_status = %s ORDER BY id ASC", $storage_profile_id, $relative_path, ObjectRemoteStatus::PRESENT ), ARRAY_A );
+		return is_array( $rows ) ? $rows : array();
+	}
+
+	/**
 	 * Upsert by UNIQUE(storage_profile_id, object_key_hash).
 	 *
 	 * @param array<string, mixed> $data Row fields.

@@ -127,10 +127,17 @@ scope_in_stage() {
 	(
 		cd "${STAGE}/${CORE_SLUG}"
 		rm -rf build/scoped
+		# PHP-Scoper 0.18's transitive Safe 2.x dependency emits a PHP 8.4
+		# nullable-parameter deprecation while Composer autoloads it. PHP-Scoper
+		# promotes every reported deprecation to an exception before its command
+		# can run. This is build-tool noise, not a plugin/runtime diagnostic, so
+		# suppress only E_DEPRECATED for this one third-party scoping invocation.
+		# The generated package and its verification still run normally.
+		SCOPER_PHP_ARGS=( -d "memory_limit=${SCOPER_MEMORY_LIMIT}" -d 'error_reporting=E_ALL & ~E_DEPRECATED' )
 		if command -v php >/dev/null 2>&1; then
-			php -d memory_limit="${SCOPER_MEMORY_LIMIT}" "${SCOPER_BIN}" add-prefix --force --output-dir=build/scoped
+			php "${SCOPER_PHP_ARGS[@]}" "${SCOPER_BIN}" add-prefix --force --output-dir=build/scoped
 		elif [[ -f "${REPO_ROOT}/docker-compose.yml" ]]; then
-			( cd "${REPO_ROOT}" && docker compose exec -T php bash -c "cd ${docker_rel} && php -d memory_limit=${SCOPER_MEMORY_LIMIT} ${container_scoper} add-prefix --force --output-dir=build/scoped" )
+			( cd "${REPO_ROOT}" && docker compose exec -T php bash -c "cd ${docker_rel} && php -d memory_limit=${SCOPER_MEMORY_LIMIT} -d 'error_reporting=E_ALL & ~E_DEPRECATED' ${container_scoper} add-prefix --force --output-dir=build/scoped" )
 		else
 			echo "ERROR: php required to run php-scoper." >&2
 			exit 1

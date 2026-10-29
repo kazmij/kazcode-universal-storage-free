@@ -48,6 +48,7 @@ final class AttachmentUrlFilter {
 		add_filter('wp_prepare_attachment_for_js', array($this, 'filter_prepare_for_js'), 10, 3);
 		add_filter('rest_prepare_attachment', array($this, 'filter_rest_prepare'), 10, 3);
 		add_filter('wp_content_img_tag', array($this, 'filter_content_img_tag'), 10, 3);
+		add_filter('attachment_url_to_postid', array($this, 'filter_attachment_url_to_postid'), 10, 2);
 	}
 
 	/**
@@ -62,13 +63,34 @@ final class AttachmentUrlFilter {
 	}
 
 	/**
+	 * Whether this precise uploads-relative variant can be delivered remotely.
+	 *
+	 * Fully offloaded attachments preserve their established delivery behaviour.
+	 * A partial attachment is different: each original, generated size, or backup
+	 * must have its own `present` inventory row before it can be rewritten.
+	 */
+	private function should_serve_relative( int $attachment_id, string $relative ): bool {
+		if ( ! $this->settings->is_serve_enabled() || trim( $relative ) === '' ) {
+			return false;
+		}
+
+		$status = (string) get_post_meta( $attachment_id, '_s3ms_status', true );
+		if ( $status === AttachmentOffloader::STATUS_OFFLOADED ) {
+			return true;
+		}
+
+		return $status === AttachmentOffloader::STATUS_PARTIAL
+			&& $this->profile_urls->has_present_attachment_relative( $attachment_id, $relative );
+	}
+
+	/**
 	 * Filter full attachment URL.
 	 *
 	 * @param string $url URL.
 	 * @param int    $attachment_id Attachment ID.
 	 */
 	public function filter_attachment_url(string $url, int $attachment_id): string {
-		if (!$this->should_serve($attachment_id)) {
+		if (!$this->settings->is_serve_enabled()) {
 			return $url;
 		}
 		if (!$this->settings->has_public_url_config()) {
@@ -83,6 +105,18 @@ final class AttachmentUrlFilter {
 	}
 
 	/**
+	 * Preserve WordPress's own match and resolve only an inventory-proven active
+	 * delivery URL when core has no canonical-local answer. This is read-only:
+	 * a foreign or ambiguous URL deliberately remains unmatched.
+	 */
+	public function filter_attachment_url_to_postid( ?int $post_id, string $url ): int {
+		if ( (int) $post_id > 0 ) {
+			return (int) $post_id;
+		}
+		return $this->profile_urls->attachment_id_for_delivery_url( $url );
+	}
+
+	/**
 	 * Filter image src array.
 	 *
 	 * @param array{0:string,1:int,2:int,3:bool}|false $image Image data.
@@ -92,12 +126,19 @@ final class AttachmentUrlFilter {
 	 * @return array{0:string,1:int,2:int,3:bool}|false
 	 */
 	public function filter_image_src($image, int $attachment_id, $size, bool $icon) {
-		if ($image === false || !$this->should_serve($attachment_id)) {
+		if ($image === false || !$this->settings->is_serve_enabled()) {
 			return $image;
 		}
 
 		$resolved = $this->resolve_size_url($attachment_id, $size);
 		if ($resolved === null || $this->is_full_object_fallback_for_non_image($attachment_id, $resolved)) {
+			return $image;
+		}
+		if ( $resolved['url'] === '' ) {
+			$fallback = $this->local_url_for_unavailable_partial_variant( $attachment_id, $resolved['relative'] );
+			if ( $fallback !== '' ) {
+				$image[0] = $fallback;
+			}
 			return $image;
 		}
 
@@ -120,7 +161,7 @@ final class AttachmentUrlFilter {
 	 * @return bool|array{0:string,1:int,2:int,3:bool}
 	 */
 	public function filter_image_downsize($downsize, int $attachment_id, $size) {
-		if ($downsize !== false || !$this->should_serve($attachment_id)) {
+		if ($downsize !== false || !$this->settings->is_serve_enabled()) {
 			return $downsize;
 		}
 		if (!$this->settings->has_public_url_config()) {
@@ -152,7 +193,7 @@ final class AttachmentUrlFilter {
 	 * @return array<string, array{url:string,descriptor:string,value:int}>
 	 */
 	public function filter_srcset(array $sources, array $size_array, string $image_src, array $image_meta, int $attachment_id): array {
-		if (!$this->should_serve($attachment_id) || $sources === array()) {
+		if (!$this->settings->is_serve_enabled() || $sources === array()) {
 			return $sources;
 		}
 
@@ -169,8 +210,16 @@ final class AttachmentUrlFilter {
 			if ($base === '') {
 				continue;
 			}
-			$relative           = $dir . $base;
-			$sources[ $width ]['url'] = $this->serve_url_for_relative( $relative, $attachment_id );
+			$relative = $dir . $base;
+			$resolved = $this->serve_url_for_relative( $relative, $attachment_id );
+			if ( $resolved !== '' ) {
+				$sources[ $width ]['url'] = $resolved;
+			} else {
+				$fallback = $this->local_url_for_unavailable_partial_variant( $attachment_id, $relative );
+				if ( $fallback !== '' ) {
+					$sources[ $width ]['url'] = $fallback;
+				}
+			}
 		}
 
 		return $sources;
@@ -186,13 +235,16 @@ final class AttachmentUrlFilter {
 	 */
 	public function filter_prepare_for_js(array $response, \WP_Post $attachment, $meta): array {
 		$id = (int) $attachment->ID;
-		if (!$this->should_serve($id)) {
+		if (!$this->settings->is_serve_enabled()) {
 			return $response;
 		}
 
 		$attached = (string) get_post_meta($id, '_wp_attached_file', true);
 		if ($attached !== '') {
-			$response['url'] = $this->serve_url_for_relative( $attached, $id );
+			$resolved = $this->serve_url_for_relative( $attached, $id );
+			if ( $resolved !== '' ) {
+				$response['url'] = $resolved;
+			}
 		}
 
 		if (!empty($response['sizes']) && is_array($response['sizes'])) {
@@ -202,7 +254,10 @@ final class AttachmentUrlFilter {
 				}
 				$resolved = $this->resolve_size_url($id, (string) $name);
 				if ($resolved !== null) {
-					$response['sizes'][ $name ]['url'] = $resolved['url'];
+					$url = $resolved['url'] !== '' ? $resolved['url'] : $this->local_url_for_unavailable_partial_variant( $id, $resolved['relative'] );
+					if ( $url !== '' ) {
+						$response['sizes'][ $name ]['url'] = $url;
+					}
 				}
 			}
 		}
@@ -212,7 +267,7 @@ final class AttachmentUrlFilter {
 			// object is not a thumbnail: replacing a native icon (e.g. the ZIP
 			// icon) with the remote object URL would break the Media Library.
 			$thumb = $this->resolve_size_url($id, 'thumbnail');
-			if ($thumb !== null && $thumb['is_intermediate']) {
+			if ($thumb !== null && $thumb['url'] !== '' && $thumb['is_intermediate']) {
 				$response['icon'] = $thumb['url'];
 			}
 		}
@@ -229,7 +284,7 @@ final class AttachmentUrlFilter {
 	 */
 	public function filter_rest_prepare(\WP_REST_Response $response, \WP_Post $post, $request): \WP_REST_Response {
 		$id = (int) $post->ID;
-		if (!$this->should_serve($id)) {
+		if (!$this->settings->is_serve_enabled()) {
 			return $response;
 		}
 
@@ -240,7 +295,10 @@ final class AttachmentUrlFilter {
 
 		$attached = (string) get_post_meta($id, '_wp_attached_file', true);
 		if ($attached !== '') {
-			$data['source_url'] = $this->serve_url_for_relative( $attached, $id );
+			$resolved = $this->serve_url_for_relative( $attached, $id );
+			if ( $resolved !== '' ) {
+				$data['source_url'] = $resolved;
+			}
 		}
 
 		// WP_REST_Attachments_Controller supplies media_details as a stdClass on
@@ -255,7 +313,10 @@ final class AttachmentUrlFilter {
 			foreach ($media_details['sizes'] as $name => $size_data) {
 				$resolved = $this->resolve_size_url($id, (string) $name);
 				if ($resolved !== null) {
-					$media_details['sizes'][ $name ]['source_url'] = $resolved['url'];
+					$url = $resolved['url'] !== '' ? $resolved['url'] : $this->local_url_for_unavailable_partial_variant( $id, $resolved['relative'] );
+					if ( $url !== '' ) {
+						$media_details['sizes'][ $name ]['source_url'] = $url;
+					}
 				}
 			}
 			$data['media_details'] = $media_details;
@@ -282,7 +343,7 @@ final class AttachmentUrlFilter {
 	public function filter_content_img_tag($filtered_image, $context, $attachment_id): string {
 		$tag = (string) $filtered_image;
 		$id  = (int) $attachment_id;
-		if ($id <= 0 || !$this->should_serve($id) || !$this->settings->has_public_url_config()) {
+		if ($id <= 0 || !$this->settings->is_serve_enabled() || !$this->settings->has_public_url_config()) {
 			return $tag;
 		}
 		if (!preg_match('/\ssrc=(["\'])([^"\']+)\1/i', $tag, $match)) {
@@ -338,6 +399,9 @@ final class AttachmentUrlFilter {
 	 * Public or signed URL for a relative uploads path.
 	 */
 	private function serve_url_for_relative( string $relative, int $attachment_id ): string {
+		if ( ! $this->should_serve_relative( $attachment_id, $relative ) ) {
+			return '';
+		}
 		if ( $this->settings->is_private_media() && $this->storage !== null ) {
 			try {
 				return $this->storage->presigned_url_for_relative( $relative, $this->settings->signed_url_ttl() );
@@ -350,6 +414,20 @@ final class AttachmentUrlFilter {
 			}
 		}
 		return $this->profile_urls->url_for_attachment_relative( $attachment_id, $relative );
+	}
+
+	/**
+	 * WordPress may derive a generated-size URL from a remote original before
+	 * this filter runs. For a partial attachment, a confirmed-missing derivative
+	 * must undo that inherited URL and retain its canonical uploads URL instead.
+	 */
+	private function local_url_for_unavailable_partial_variant( int $attachment_id, string $relative ): string {
+		if ( (string) get_post_meta( $attachment_id, '_s3ms_status', true ) !== AttachmentOffloader::STATUS_PARTIAL ) {
+			return '';
+		}
+		$relative = trim( str_replace( '\\', '/', $relative ), '/' );
+		$base     = rtrim( (string) ( wp_upload_dir()['baseurl'] ?? '' ), '/' );
+		return $relative !== '' && $base !== '' ? $base . '/' . $relative : '';
 	}
 
 	/**
@@ -376,7 +454,7 @@ final class AttachmentUrlFilter {
 	 *
 	 * @param int             $attachment_id Attachment ID.
 	 * @param string|int[]    $size Size.
-	 * @return array{url:string,width:int,height:int,is_intermediate:bool}|null
+	 * @return array{url:string,relative:string,width:int,height:int,is_intermediate:bool}|null
 	 */
 	private function resolve_size_url(int $attachment_id, $size): ?array {
 		$attached = (string) get_post_meta($attachment_id, '_wp_attached_file', true);
@@ -394,6 +472,7 @@ final class AttachmentUrlFilter {
 		if ($size_name === 'full' || $size === 'full') {
 			return array(
 				'url'             => $this->serve_url_for_relative( $attached, $attachment_id ),
+				'relative'        => $attached,
 				'width'           => isset($meta['width']) ? (int) $meta['width'] : 0,
 				'height'          => isset($meta['height']) ? (int) $meta['height'] : 0,
 				'is_intermediate' => false,
@@ -404,6 +483,7 @@ final class AttachmentUrlFilter {
 			// Best-effort: use full.
 			return array(
 				'url'             => $this->serve_url_for_relative( $attached, $attachment_id ),
+				'relative'        => $attached,
 				'width'           => (int) ($size[0] ?? ($meta['width'] ?? 0)),
 				'height'          => (int) ($size[1] ?? ($meta['height'] ?? 0)),
 				'is_intermediate' => false,
@@ -415,6 +495,7 @@ final class AttachmentUrlFilter {
 			$rel  = $this->keys->relative_for_size($attached, $file);
 			return array(
 				'url'             => $this->serve_url_for_relative( $rel, $attachment_id ),
+				'relative'        => $rel,
 				'width'           => (int) ($meta['sizes'][ $size_name ]['width'] ?? 0),
 				'height'          => (int) ($meta['sizes'][ $size_name ]['height'] ?? 0),
 				'is_intermediate' => true,
@@ -424,6 +505,7 @@ final class AttachmentUrlFilter {
 		// Fallback to full.
 		return array(
 			'url'             => $this->serve_url_for_relative( $attached, $attachment_id ),
+			'relative'        => $attached,
 			'width'           => isset($meta['width']) ? (int) $meta['width'] : 0,
 			'height'          => isset($meta['height']) ? (int) $meta['height'] : 0,
 			'is_intermediate' => false,

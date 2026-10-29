@@ -85,9 +85,6 @@ final class AttachmentRestorer {
 	 * @param int $attachment_id Attachment ID.
 	 */
 	public function on_delete_attachment(int $attachment_id): void {
-		if (!$this->settings->is_enabled() || !$this->settings->should_delete_remote()) {
-			return;
-		}
 		$status = (string) get_post_meta($attachment_id, '_s3ms_status', true);
 		$key    = (string) get_post_meta($attachment_id, '_s3ms_original_key', true);
 		$binding_metadata = (string) get_post_meta( $attachment_id, '_s3ms_direct_upload_reservation_binding', true );
@@ -155,6 +152,13 @@ final class AttachmentRestorer {
 		// even after local restore clears ordinary offload markers and inventory
 		// rows. Valid evidence is its sole deletion authority in either state.
 		$direct_upload_cleanup = $cleanup !== null || $this->has_direct_upload_cleanup_evidence( $attachment_id );
+		// Direct Upload has its own profile-bound cleanup proof and can be used
+		// while the legacy offload toggle is disabled.  The old early return above
+		// skipped this hook entirely on Pro-only Direct Upload sites, leaving the
+		// verified remote object orphaned after the Media Library delete.
+		if ( ! $this->settings->should_delete_remote() || ( ! $direct_upload_cleanup && ! $this->settings->is_enabled() ) ) {
+			return;
+		}
 		if ( $has_direct_upload_cleanup_metadata && ! $direct_upload_cleanup ) {
 			// Both fields are present, so this is claimed Direct Upload authority.
 			// Returning would let WordPress erase the only recovery evidence.

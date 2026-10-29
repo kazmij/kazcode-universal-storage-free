@@ -13,6 +13,31 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		$this->root = dirname(__DIR__, 2);
 	}
 
+	public function test_free_and_pro_publish_the_same_php_81_floor(): void {
+		$pro_root = dirname( $this->root ) . '/kazcode-universal-storage-pro';
+		$files    = array(
+			$this->root . '/composer.json',
+			$this->root . '/kazcode-universal-storage.php',
+			$this->root . '/readme.txt',
+			$pro_root . '/composer.json',
+			$pro_root . '/kazcode-universal-storage-pro.php',
+			$pro_root . '/readme.txt',
+		);
+
+		foreach ( $files as $file ) {
+			$contents = file_get_contents( $file );
+			self::assertIsString( $contents, $file );
+			self::assertStringContainsString( '8.1', $contents, $file );
+		}
+
+		$free_composer = json_decode( (string) file_get_contents( $this->root . '/composer.json' ), true );
+		$pro_composer  = json_decode( (string) file_get_contents( $pro_root . '/composer.json' ), true );
+		self::assertSame( '>=8.1', $free_composer['require']['php'] ?? null );
+		self::assertSame( '8.1.0', $free_composer['config']['platform']['php'] ?? null );
+		self::assertSame( '>=8.1', $pro_composer['require']['php'] ?? null );
+		self::assertSame( '8.1.0', $pro_composer['config']['platform']['php'] ?? null );
+	}
+
 	public function test_freemius_dry_run_upload_does_not_require_or_print_token(): void {
 		$zip = tempnam(sys_get_temp_dir(), 'kazus-pro-') . '.zip';
 		file_put_contents($zip, 'not-a-real-zip');

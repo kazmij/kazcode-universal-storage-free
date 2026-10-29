@@ -47,13 +47,11 @@ final class AdoptService {
 		$limit         = max( 1, min( 200, $batch_size ) );
 
 		$sql = "SELECT p.ID FROM {$wpdb->posts} p
-			LEFT JOIN (
-				SELECT attachment_id, COUNT(*) AS cnt FROM {$objects_table} GROUP BY attachment_id
-			) o ON o.attachment_id = p.ID
+			LEFT JOIN {$objects_table} o ON o.attachment_id = p.ID
 			WHERE p.post_type = 'attachment'
 			AND p.post_status = 'inherit'
 			AND p.ID > %d
-			AND (o.cnt IS NULL OR o.cnt = 0)";
+			AND o.attachment_id IS NULL";
 
 		$params = array( $after_id );
 

@@ -35,6 +35,16 @@ if ! grep -q 'class_alias' "${ROOT}/vendor/kazcode-scoped.php"; then
 	fail "vendor/kazcode-scoped.php is missing the Aws\\ -> Kazcode\\WpStorage\\Vendor\\Aws\\ class_alias bridge"
 fi
 
+# PHP-Scoper can mistake SignatureV4's date-format literal for a class name.
+# A prefixed literal generates a malformed X-Amz-Date header, causing every
+# signed request to real S3-compatible storage to fail authentication.
+SIGNATURE_V4="${ROOT}/vendor/aws/aws-sdk-php/src/Signature/SignatureV4.php"
+[[ -f "${SIGNATURE_V4}" ]] || fail "missing scoped AWS SignatureV4 implementation"
+grep -Fq "const ISO8601_BASIC = 'Ymd\\\\THis\\\\Z';" "${SIGNATURE_V4}" || fail "SignatureV4 ISO8601_BASIC was not preserved as a PHP date format"
+if grep -Fq 'const ISO8601_BASIC = '\''Kazcode' "${SIGNATURE_V4}"; then
+	fail "SignatureV4 ISO8601_BASIC was incorrectly namespace-prefixed"
+fi
+
 # The definitive check, robust either way PHP-Scoper handled includes/ (real
 # per-file rewrite of `use Aws\...`, or left as-is and covered by the
 # class_alias bridge in vendor/kazcode-scoped.php): after loading the shipped

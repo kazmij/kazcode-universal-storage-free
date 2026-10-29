@@ -40,6 +40,22 @@ Test: `DeleteAttachmentCharacterizationTest`.
 
 Test: `UrlSettingsRetargetCharacterizationTest`.
 
+### Canonical content and delivery identity (#65)
+
+| Behavior | Expected | Evidence |
+|----------|----------|----------|
+| Stored references | Post content and Gutenberg block attributes retain canonical site-owned uploads URLs; delivery rewriting occurs only while rendering/API output, so a restore or delivery-domain rotation never writes user content. | `AttachmentUrlFilterRestResponseTest`; `content-canonical-src-real.spec.js` |
+| Reverse lookup | `attachment_url_to_postid()` retains a non-zero WordPress result. When core has no match, KAZCODE returns an attachment only for exactly one `present` profile-bound CDN object whose current computed delivery URL matches; a query/fragment or http/https variation is normalized, while foreign, stale and ambiguous owners return `0`. | `ProfileDeliveryUrlResolverTest`; `AttachmentUrlFilterRestResponseTest` |
+
+### Partial attachment delivery (#152)
+
+| Behavior | Expected | Evidence |
+|----------|----------|----------|
+| Exact variant eligibility | An attachment with `_s3ms_status=partial` is rewritten only when that exact uploads-relative original, generated size, or backup has a `s3ms_objects.remote_status=present` row. A present sibling never authorizes a missing variant. | `ProfileDeliveryUrlResolverTest::test_present_row_eligibility_is_exact_to_the_attachment_relative_path`; `AttachmentUrlFilterRestResponseTest` partial cases |
+| Cloud-only original missing | After Verify records the original's confirmed 404, present generated sizes retain their profile delivery URL; the missing original keeps its canonical/local URL for repair and diagnostics. | `variant-delivery-isolated.spec.js` |
+| Generated size missing | After Verify records a generated size's confirmed 404, the present original retains its profile delivery URL; the missing size is not rewritten. | `variant-delivery-isolated.spec.js` |
+| Private media | The exact-row eligibility check runs before presigning, so only a present variant receives a signed URL. | `AttachmentUrlFilterRestResponseTest::test_partial_attachment_uses_signed_url_only_for_its_present_variant` |
+
 ## Background job (P0-T06)
 
 Option `s3ms_background_job`; cron `s3ms_background_tick`.  
@@ -109,6 +125,7 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 | Same bucket, different prefix | Server-side CopyObject when provider identity matches | `SameProviderCopyStrategyTest`, `MigrateObjectServiceTest::test_dry_run_uses_copy_for_same_bucket` |
 | Retry missing only | HEAD skip for present objects; retry queue includes failed + partial | `ObjectOffloadServiceTest::test_retry_skips_objects_already_present_on_remote`, `MigrationService::STATUS_FILTER_RETRY` |
 | Storage migration | Resumable batch + explicit default switch locks location | `StorageMigrationServiceTest` |
+| Verify / Restore cursors | Batch selectors advance by `after_id` against fresh database state and set `no_found_rows=true`, because they do not consume `found_posts`; total-row work must not reappear on each page. | `MigrationServiceCursorQueryContractTest`; 10k/50k/100k evidence in `docs/testing/LARGE-LIBRARY-CHARACTERIZATION.md` |
 | Crash / tick lease | Background tick lease prevents overlapping cron batches | `BackgroundMigrator::TICK_LEASE_KEY`, characterization test |
 | Cross-provider credentials | A profile can hold its own encrypted access key/secret (`ProfileCredentialStore`) instead of the site-wide Settings secret — required since e.g. AWS and R2 profiles need different keys; without this, `ProfileS3ClientFactory` always used Settings' single secret for every profile, so a real cross-provider migration authenticated with the wrong provider's credentials | `ProfileCredentialStoreTest`, `StorageProfileAdminServiceTest::test_create_with_custom_credentials_stores_them_off_the_legacy_ref` et al.; live-verified against real AWS S3 + Cloudflare R2 test buckets (dry-run, real stream migration, `--delete-source` via async queue, independent SDK verification on both sides) |
 | Delivery URL after migration | Resolver prefers the non-stale row for a relative path, so the destination profile's URL is served immediately after a successful migration, not the pre-migration (now-stale) one | `ProfileDeliveryUrlResolverTest::test_prefers_present_row_over_stale_row_after_migration`; live-verified |
@@ -118,7 +135,7 @@ No local PHP/Composer? Use the repo-root `Makefile` (`make test-all`) — runs i
 | Behavior | Expected | Test |
 |----------|----------|------|
 | HEAD inventory only | Build `s3ms_objects` rows from manifest + HEAD; **never** Put/upload | `AdoptAttachmentServiceTest` |
-| Legacy candidates | Batch targets offloaded attachments without object rows | `AdoptService::query_ids` |
+| Legacy candidates | Batch targets offloaded attachments without object rows. The cursor excludes any matching inventory row through the indexed `s3ms_objects.attachment_id` join; it must not materialize a grouped inventory table for each page. | `AdoptServiceQueryPlanTest::test_legacy_cursor_uses_the_attachment_id_index_without_grouping_inventory_rows`; 10k/50k/100k evidence in `docs/testing/LARGE-LIBRARY-CHARACTERIZATION.md` |
 | Transient HEAD error ≠ missing (fixed bug) | A HEAD failure that is not a confirmed 404 is skipped (counted as `errors`, row left unchanged) instead of being written as `remote_status=missing` — a transient outage during Adopt no longer falsely marks present objects as missing | `AdoptAttachmentServiceTest::test_transient_head_error_does_not_record_missing_row` |
 
 ## Free / Pro separation (Phase 9)

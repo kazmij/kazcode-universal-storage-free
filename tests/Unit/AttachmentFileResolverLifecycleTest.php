@@ -18,11 +18,26 @@ use Kazcode\WpStorage\Tests\Support\WpStubs;
 
 final class AttachmentFileResolverLifecycleTest extends TestCase {
 
+	private string $uploads;
+
 	protected function setUp(): void {
 		WpStubs::reset();
+		$this->uploads = sys_get_temp_dir() . '/kazus-sidecar-resolver-' . bin2hex( random_bytes( 6 ) );
+		mkdir( $this->uploads . '/2026/10', 0777, true );
+		WpStubs::$uploads_basedir = $this->uploads;
 	}
 
 	protected function tearDown(): void {
+		if ( is_dir( $this->uploads ) ) {
+			$files = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator( $this->uploads, \FilesystemIterator::SKIP_DOTS ),
+				\RecursiveIteratorIterator::CHILD_FIRST
+			);
+			foreach ( $files as $file ) {
+				$file->isDir() ? rmdir( $file->getPathname() ) : unlink( $file->getPathname() );
+			}
+			rmdir( $this->uploads );
+		}
 		WpStubs::reset();
 	}
 
@@ -72,5 +87,20 @@ final class AttachmentFileResolverLifecycleTest extends TestCase {
 			array( '2026/09/same.jpg' ),
 			( new AttachmentFileResolver() )->relative_paths( 3 )
 		);
+	}
+
+	public function test_existing_local_files_for_manifest_paths_returns_only_safe_existing_sidecars(): void {
+		$webp = $this->uploads . '/2026/10/photo.webp';
+		file_put_contents( $webp, 'webp-sidecar' );
+
+		$files = ( new AttachmentFileResolver() )->existing_local_files_for_manifest_paths(
+			array(
+				'2026/10/photo.webp',
+				'../outside.avif',
+				'2026/10/missing.avif',
+			)
+		);
+
+		$this->assertSame( array( '2026/10/photo.webp' => $webp ), $files );
 	}
 }

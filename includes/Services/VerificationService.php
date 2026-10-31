@@ -14,6 +14,7 @@ defined( 'ABSPATH' ) || exit;
 use Kazcode\WpStorage\Attachment\AttachmentFileResolver;
 use Kazcode\WpStorage\Attachment\AttachmentOffloader;
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Domain\ManifestBuilder;
 use Kazcode\WpStorage\Domain\ObjectRemoteStatus;
 use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
@@ -54,7 +55,7 @@ final class VerificationService {
 		$details  = array();
 		$attached = (string) get_post_meta($attachment_id, '_wp_attached_file', true);
 		$s3_status = (string) get_post_meta($attachment_id, '_s3ms_status', true);
-		$paths    = $this->files->relative_paths($attachment_id);
+		$paths    = ( new ManifestBuilder( $this->files ) )->build( $attachment_id )->relative_paths();
 
 		if ($attached === '' || $paths === array()) {
 			return array(
@@ -64,7 +65,7 @@ final class VerificationService {
 			);
 		}
 
-		$local_count = count($this->files->existing_local_files($attachment_id));
+		$local_count = count( $this->files->existing_local_files_for_manifest_paths( $paths ) );
 		$missing_s3  = array();
 		$unknown_s3  = array();
 		$size_mismatch = array();

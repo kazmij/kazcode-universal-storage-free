@@ -12,6 +12,7 @@ namespace Kazcode\WpStorage\Services;
 defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Attachment\AttachmentFileResolver;
+use Kazcode\WpStorage\Domain\ManifestBuilder;
 use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
 
@@ -45,7 +46,7 @@ final class RemoteDeleteSafetyGuard {
 	 * @return array{status:string,reason:string,keys:list<string>,locations:list<ProfileObjectLocation>}
 	 */
 	public function evaluate( int $attachment_id ): array {
-		$relatives = $this->files->relative_paths( $attachment_id );
+		$relatives = ( new ManifestBuilder( $this->files ) )->build( $attachment_id )->relative_paths();
 		if ( $relatives === array() ) {
 			return $this->unknown( 'no_manifest' );
 		}

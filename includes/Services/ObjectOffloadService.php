@@ -102,16 +102,16 @@ final class ObjectOffloadService {
 			throw new \RuntimeException( 'No default storage profile configured.' );
 		}
 
-		$local_files = $this->files->existing_local_files( $attachment_id, $metadata_override );
+		$manifest    = $this->manifest_builder->build( $attachment_id, $metadata_override );
+		$local_files = $this->files->existing_local_files_for_manifest_paths( $manifest->relative_paths() );
 		if ( $local_files === array() ) {
-			$paths = $this->files->relative_paths( $attachment_id, $metadata_override );
+			$paths = $manifest->relative_paths();
 			if ( $paths === array() ) {
 				throw new \RuntimeException( 'Attachment has no file metadata.' );
 			}
 			throw new \RuntimeException( 'No local files found to upload. Restore from S3 first if files were deleted.' );
 		}
 
-		$manifest      = $this->manifest_builder->build( $attachment_id, $metadata_override );
 		$uploaded_keys = array();
 		$failures      = array();
 		/** @var array<string, string> $intended_bindings relative => object_key for this profile run */

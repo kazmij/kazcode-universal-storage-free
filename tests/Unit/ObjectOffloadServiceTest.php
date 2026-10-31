@@ -157,6 +157,49 @@ final class ObjectOffloadServiceTest extends TestCase {
 		}
 	}
 
+	public function test_offload_uploads_existing_hook_contributed_sidecar(): void {
+		$this->touch_file( '2026/08/photo.jpg', 100 );
+		$this->touch_file( '2026/08/photo.webp', 60 );
+		WpStubs::set_meta( 11, '_wp_attached_file', '2026/08/photo.jpg' );
+		WpStubs::set_meta( 11, '_wp_attachment_metadata', array( 'file' => '2026/08/photo.jpg', 'sizes' => array() ) );
+		add_filter(
+			'kazus_manifest_files',
+			static fn( array $items ): array => array_merge(
+				$items,
+				array( array( 'relative' => '2026/08/photo.webp', 'variant_type' => 'webp' ) )
+			)
+		);
+
+		$settings = $this->createMock( Settings::class );
+		$settings->method( 'should_delete_local' )->willReturn( false );
+		$settings->method( 'should_verify_before_delete' )->willReturn( true );
+		$keys    = new S3KeyResolver( $this->settings_map( array( 'object_prefix' => 'uploads/' ) ) );
+		$storage = $this->createMock( S3Storage::class );
+		$storage->method( 'keys' )->willReturn( $keys );
+		$storage->method( 'content_type_for_local_file' )->willReturn( 'image/webp' );
+		$uploaded = array();
+		$storage->method( 'head_key' )->willReturnCallback(
+			static function ( string $key ) use ( &$uploaded ): array {
+				return isset( $uploaded[ $key ] )
+					? array( 'exists' => true, 'content_length' => $uploaded[ $key ] )
+					: array( 'exists' => false );
+			}
+		);
+		$transfer = new ObjectOffloadTransferCallbackFake(
+			function ( int $attachment_id, int $profile_id, string $relative, string $key ) use ( &$uploaded ): array {
+				unset( $attachment_id, $profile_id );
+				$uploaded[ $key ] = (int) filesize( $this->uploads . '/' . $relative );
+				return array( 'success' => true, 'verified_complete' => true, 'session_uuid' => 'sidecar', 'resumed' => false, 'message' => 'Destination verified.' );
+			}
+		);
+
+		$result = $this->build_service_from_parts( $settings, $storage, new AttachmentFileResolver( $keys ), $transfer )->offload( 11, false );
+
+		$this->assertTrue( $result['success'] );
+		$this->assertSame( AttachmentOffloader::STATUS_OFFLOADED, $result['status'] );
+		$this->assertSame( array( 'uploads/2026/08/photo.jpg', 'uploads/2026/08/photo.webp' ), $result['keys'] );
+	}
+
 	public function test_retry_skips_objects_already_present_on_remote(): void {
 		$files = array(
 			'2026/08/photo.jpg'         => $this->touch_file( '2026/08/photo.jpg', 100 ),

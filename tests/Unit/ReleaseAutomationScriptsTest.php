@@ -75,6 +75,23 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringContainsString('release_mode=released', $result['output']);
 	}
 
+	public function test_freemius_download_refuses_to_report_success_when_its_output_cannot_be_written(): void {
+		$script = file_get_contents($this->root . '/build/release-freemius.php');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('dirname($download)', $script);
+		self::assertStringContainsString("throw new RuntimeException('unable to create download directory: ' . \$directory);", $script);
+		self::assertStringContainsString("throw new RuntimeException('unable to write downloaded Freemius artifact: ' . \$download);", $script);
+	}
+
+	public function test_freemius_status_uses_the_documented_deployment_collection_endpoint(): void {
+		$script = file_get_contents($this->root . '/build/release-freemius.php');
+
+		self::assertIsString($script);
+		self::assertStringContainsString("api('GET', '/tags.json?count=50')", $script);
+		self::assertStringNotContainsString("api('GET', '/tags/' . rawurlencode(\$tag_id) . '.json')", $script);
+	}
+
 	public function test_release_scripts_expose_help(): void {
 		foreach (array(
 			'/build/release-wordpress-org.sh',
@@ -98,6 +115,13 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringContainsString('--password-from-stdin', $script);
 		self::assertStringNotContainsString('--password "${KAZUS_WPORG_PASSWORD}"', $script);
 		self::assertStringNotContainsString("--password '\${KAZUS_WPORG_PASSWORD}'", $script);
+	}
+
+	public function test_wordpress_publish_allows_a_long_svn_http_transaction(): void {
+		$script = file_get_contents($this->root . '/build/release-wordpress-org.sh');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('--config-option servers:global:http-timeout=1800', $script);
 	}
 
 	public function test_wordpress_org_operator_wrapper_rejects_malformed_credentials_without_invoking_make(): void {
@@ -164,7 +188,10 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertIsString($makefile);
 		self::assertStringContainsString('build/release-freemius.php upload', $makefile);
 		self::assertStringContainsString('--mode "$(MODE)"', $makefile);
-		self::assertStringContainsString('DEXEC_RELEASE', $makefile);
+		self::assertStringContainsString('FREEMIUS_RELEASE_DOCKER', $makefile);
+		self::assertStringContainsString('apt-get install -y -qq git curl', $makefile);
+		self::assertStringContainsString('docker-php-ext-install curl', $makefile);
+		self::assertStringNotContainsString('DEXEC_RELEASE', $makefile);
 	}
 
 	public function test_pro_release_sdk_gate_rejects_a_vendored_sdk_older_than_the_latest_stable_version(): void {
@@ -240,6 +267,25 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringContainsString('PRO_ZIP="${DIST}/${PRO_SLUG}-${PRO_VERSION}.zip"', $script);
 		self::assertStringContainsString("find dist -maxdepth 1 -name 'kazcode-universal-storage-pro-*.zip'", $from_tag);
 		self::assertStringNotContainsString('dist/kazcode-universal-storage-pro-${VERSION}.zip', $from_tag);
+	}
+
+	public function test_build_release_normalizes_zip_metadata_and_entry_order(): void {
+		$script = file_get_contents($this->root . '/build/build-release.sh');
+
+		self::assertIsString($script);
+		self::assertStringContainsString('SOURCE_DATE_EPOCH', $script);
+		self::assertStringContainsString("git -C \"\${ROOT}\" log -1 --format=%ct HEAD", $script);
+		self::assertStringContainsString('touch -h -d "@${SOURCE_DATE_EPOCH}"', $script);
+		self::assertStringContainsString('LC_ALL=C find "${CORE_SLUG}" -print | LC_ALL=C sort | zip -X -q "${CORE_ZIP}" -@', $script);
+		self::assertStringContainsString('LC_ALL=C find "${PRO_SLUG}" -print | LC_ALL=C sort | zip -X -q "${PRO_ZIP}" -@', $script);
+	}
+
+	public function test_build_zip_forwards_checkout_source_date_to_git_free_staging_build(): void {
+		$script = file_get_contents( dirname( $this->root ) . '/tools/dev/build-zip.sh' );
+
+		self::assertIsString( $script );
+		self::assertStringContainsString( 'source_date_epoch="$(git -C "${KAZUS_REPO}" log -1 --format=%ct HEAD)"', $script );
+		self::assertStringContainsString( '-e SOURCE_DATE_EPOCH="${source_date_epoch}"', $script );
 	}
 
 	public function test_build_release_fails_closed_when_the_pro_package_lacks_its_required_readme(): void {

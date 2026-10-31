@@ -157,11 +157,13 @@ final class MigrationPage {
 						<button type="button" class="button" data-s3ms-import-action="detect"><?php esc_html_e( 'Detect sources', 'kazcode-universal-storage' ); ?></button>
 						<button type="button" class="button button-secondary" data-s3ms-import-action="analyze"><?php esc_html_e( 'Analyze', 'kazcode-universal-storage' ); ?></button>
 						<button type="button" class="button button-primary" data-s3ms-import-action="commit" disabled><?php esc_html_e( 'Commit import', 'kazcode-universal-storage' ); ?></button>
+						<button type="button" class="button" data-s3ms-import-action="remediate" disabled><?php esc_html_e( 'Upload eligible local files', 'kazcode-universal-storage' ); ?></button>
 						<button type="button" class="button" data-s3ms-import-action="pause" disabled><?php esc_html_e( 'Pause', 'kazcode-universal-storage' ); ?></button>
 						<button type="button" class="button" data-s3ms-import-action="resume" disabled><?php esc_html_e( 'Resume', 'kazcode-universal-storage' ); ?></button>
 						<button type="button" class="button" data-s3ms-import-action="cancel" disabled><?php esc_html_e( 'Cancel', 'kazcode-universal-storage' ); ?></button>
 					</p>
 					<div class="s3ms-test-result" id="s3ms-import-status" role="status" aria-live="polite"></div>
+					<p class="description"><?php esc_html_e( 'After analysis, upload only rows confirmed missing remotely or with a size conflict when their current local file is still safe to use. This does not modify competitor metadata or delete local files.', 'kazcode-universal-storage' ); ?></p>
 
 					<div class="s3ms-status-grid s3ms-status-grid--import" id="s3ms-import-report">
 						<div class="s3ms-stat is-muted"><span class="s3ms-stat__label"><?php esc_html_e( 'Attachments scanned', 'kazcode-universal-storage' ); ?></span><strong class="s3ms-stat__value" data-s3ms-import-count="processed">0</strong></div>

@@ -270,7 +270,7 @@ ${PRO_VERSION} requires Free/Core ${PRO_REQUIRES_CORE} or newer.
 ## Requirements
 
 * WordPress >= 6.7
-* PHP >= 8.3
+* PHP >= 8.1
 
 ## Download integrity
 

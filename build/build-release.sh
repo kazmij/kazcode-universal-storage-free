@@ -24,6 +24,12 @@ VERSION="$(grep -m1 "KAZUS_VERSION" "${ROOT}/kazcode-universal-storage.php" | se
 SCOPER_BIN="${ROOT}/vendor/bin/php-scoper"
 SCOPER_MEMORY_LIMIT="${SCOPER_MEMORY_LIMIT:-1024M}"
 COMPOSER_AUTOLOADER_SUFFIX="${KAZUS_COMPOSER_AUTOLOADER_SUFFIX:-8cdd760b077ab5b8842437bb000793cb}"
+# A release ZIP is a public artifact, not merely an installation transport.
+# Derive its timestamp from immutable source history so two builds of the same
+# tag cannot silently create differently hashed artifacts due to staging,
+# Composer or PHP-Scoper write times.
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "${ROOT}" log -1 --format=%ct HEAD)}"
+[[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]] || { echo "ERROR: SOURCE_DATE_EPOCH must be a Unix timestamp." >&2; exit 1; }
 
 CORE_SLUG="kazcode-universal-storage"
 PRO_SLUG="kazcode-universal-storage-pro"
@@ -118,6 +124,11 @@ run_php_in_stage() {
 	run_php "${ROOT}/build/${script}" "${STAGE}/${CORE_SLUG}"
 }
 
+normalize_archive_metadata() {
+	local directory="$1"
+	find "${directory}" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
+}
+
 scope_in_stage() {
 	echo "==> PHP-Scoper prefix (Kazcode\\\\WpStorage\\\\Vendor)"
 	local docker_rel
@@ -197,12 +208,13 @@ rm -rf "${STAGE}/${CORE_SLUG}/tests" \
 	"${STAGE}/${CORE_SLUG}/test-product-features-local.php"
 find "${STAGE}/${CORE_SLUG}" -maxdepth 1 -name 'docker-compose*.yml' -delete 2>/dev/null || true
 rm -f "${STAGE}/${CORE_SLUG}/vendor/aws/aws-crt-php/format-check.py"
+normalize_archive_metadata "${STAGE}/${CORE_SLUG}"
 
 echo "==> Packaging ${CORE_SLUG}-${VERSION}.zip"
 (
 	cd "${STAGE}"
 	rm -f "${CORE_ZIP}"
-	zip -rq "${CORE_ZIP}" "${CORE_SLUG}"
+	LC_ALL=C find "${CORE_SLUG}" -print | LC_ALL=C sort | zip -X -q "${CORE_ZIP}" -@
 )
 
 echo "==> Verify scoped core ZIP"
@@ -236,10 +248,11 @@ if [[ -d "${PRO_ROOT}" ]]; then
 		--exclude='composer.lock' \
 		--exclude='phpunit.xml.dist' \
 		"${PRO_ROOT}/" "${STAGE}/${PRO_SLUG}/"
+	normalize_archive_metadata "${STAGE}/${PRO_SLUG}"
 	(
 		cd "${STAGE}"
 		rm -f "${PRO_ZIP}"
-		zip -rq "${PRO_ZIP}" "${PRO_SLUG}"
+		LC_ALL=C find "${PRO_SLUG}" -print | LC_ALL=C sort | zip -X -q "${PRO_ZIP}" -@
 	)
 	# Keep the Freemius-required package metadata check with the packager, not
 	# only in CI: a manually run release build must fail before its ZIP can be

@@ -209,11 +209,26 @@ final class ProfileDeliveryUrlResolver {
 		$include_prefix = $profile->cdn_includes_prefix;
 
 		if ( $profile->delivery_type === 'cdn' && $base !== '' ) {
-			$path = $include_prefix ? $object_key : ( $relative !== '' ? $relative : $object_key );
+			$path = $include_prefix ? $object_key : $this->delivery_path_without_profile_prefix( $profile, $object_key, $relative );
 			return $base . '/' . ltrim( $this->encode_path( $path ), '/' );
 		}
 
 		return $this->default_s3_url_for_profile( $profile, $object_key );
+	}
+
+	/**
+	 * A CDN base without the configured profile prefix still needs the exact
+	 * inventory object identity. Canonical offloads reduce to their uploads
+	 * relative path, while Direct Upload originals retain their private attempt
+	 * directory rather than being rewritten to a nonexistent canonical key.
+	 */
+	private function delivery_path_without_profile_prefix( StorageProfile $profile, string $object_key, string $relative ): string {
+		$key    = ltrim( str_replace( '\\', '/', $object_key ), '/' );
+		$prefix = trim( str_replace( '\\', '/', $profile->prefix ), '/' );
+		if ( $prefix !== '' && str_starts_with( $key . '/', $prefix . '/' ) ) {
+			return ltrim( substr( $key, strlen( $prefix ) ), '/' );
+		}
+		return $relative !== '' ? $relative : $key;
 	}
 
 	private function default_s3_url_for_profile( StorageProfile $profile, string $object_key ): string {

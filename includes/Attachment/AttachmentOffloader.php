@@ -13,6 +13,7 @@ defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Domain\ManifestBuilder;
 use Kazcode\WpStorage\Domain\RemoteObservation;
 use Kazcode\WpStorage\Infrastructure\AttachmentLeaseHandle;
 use Kazcode\WpStorage\Infrastructure\AttachmentLock;
@@ -272,9 +273,10 @@ final class AttachmentOffloader {
 			update_post_meta($attachment_id, '_s3ms_status', self::STATUS_UPLOADING);
 			delete_post_meta($attachment_id, '_s3ms_last_error');
 
-			$local_files = $this->files->existing_local_files($attachment_id, $metadata_override);
+			$manifest    = ( new ManifestBuilder( $this->files ) )->build( $attachment_id, $metadata_override );
+			$local_files = $this->files->existing_local_files_for_manifest_paths( $manifest->relative_paths() );
 			if ($local_files === array()) {
-				$paths = $this->files->relative_paths($attachment_id, $metadata_override);
+				$paths = $manifest->relative_paths();
 				if ($paths === array()) {
 					throw new \RuntimeException('Attachment has no file metadata.');
 				}

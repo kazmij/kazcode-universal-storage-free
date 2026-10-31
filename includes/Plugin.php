@@ -487,7 +487,9 @@ final class Plugin {
 				$this->settings,
 				$this->url_resolver(),
 				$this->key_resolver(),
-				$this->storage()
+				$this->storage(),
+				null,
+				new ProfileAwareObjectOperations( legacy: $this->storage(), settings: $this->settings )
 			);
 		}
 		return $this->url_filter;

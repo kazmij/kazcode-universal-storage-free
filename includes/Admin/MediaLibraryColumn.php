@@ -211,7 +211,7 @@ final class MediaLibraryColumn {
 	 */
 	public function handle_row_action(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Forbidden.', 'kazcode-universal-storage' ) );
+			wp_die( esc_html__( 'Forbidden.', 'kazcode-universal-storage' ), '', array( 'response' => 403 ) );
 		}
 		$id  = isset( $_GET['attachment_id'] ) ? (int) $_GET['attachment_id'] : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 		$act = isset( $_GET['s3ms_do'] ) ? sanitize_key( (string) $_GET['s3ms_do'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended

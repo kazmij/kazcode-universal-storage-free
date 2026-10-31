@@ -64,6 +64,15 @@ final class ImportRunRepository {
 		return is_array( $row ) ? $row : null;
 	}
 
+	/** @return array<string,mixed>|null */
+	public function find_by_id( int $id ): ?array {
+		if ( $id <= 0 ) return null;
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin-owned table with prepared id.
+		$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$this->table()} WHERE id = %d", $id ), ARRAY_A );
+		return is_array( $row ) ? $row : null;
+	}
+
 	/** @return array<string, mixed>|null */
 	public function find_latest_successful_dry_run( string $source_type, int $profile_id, string $source_fingerprint ): ?array {
 		global $wpdb;

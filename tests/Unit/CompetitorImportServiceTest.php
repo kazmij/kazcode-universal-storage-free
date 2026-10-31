@@ -18,10 +18,12 @@ use Kazcode\WpStorage\Import\ImportDetection;
 use Kazcode\WpStorage\Import\ImportRegistry;
 use Kazcode\WpStorage\Import\ImportScanPage;
 use Kazcode\WpStorage\Infrastructure\ImportRunRepository;
+use Kazcode\WpStorage\Infrastructure\ImportRunItemRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
 use Kazcode\WpStorage\Services\AdoptAttachmentService;
 use Kazcode\WpStorage\Services\AuditLog;
 use Kazcode\WpStorage\Services\CompetitorImportService;
+use Kazcode\WpStorage\Services\ImportRemediationService;
 use Kazcode\WpStorage\Tests\Support\WpStubs;
 use PHPUnit\Framework\TestCase;
 
@@ -75,6 +77,34 @@ final class CompetitorImportServiceTest extends TestCase {
 		$this->assertSame( array( true, true, true ), array_column( $adopter->calls, 'dry_run' ) );
 	}
 
+	public function test_dry_run_persists_each_remote_reconciliation_outcome_without_inventory_writes(): void {
+		$items    = new CompetitorImportFakeRunItemRepository();
+		$adopter  = new CompetitorImportFakeAdopter( array( 101 => array( 'adopted' => 0, 'missing' => 1, 'errors' => 0, 'conflicts' => 0 ) ) );
+		$importer = new CompetitorImportFakeImporter( 'wp_offload_media', array( new ImportScanPage( 10, 101, array( $this->descriptor( 101, '2026/10/missing.jpg', 'legacy/missing.jpg' ) ) ), new ImportScanPage( 10, 101, array() ) ) );
+		$service  = $this->service( $importer, $adopter, null, null, null, $items );
+
+		$run = $service->start_dry_run( 'wp_offload_media', 12 );
+		$result = $service->process_next_page( $run['uuid'], 10 );
+
+		$this->assertSame( array( 'confirmed_missing' ), array_column( $items->records, 'classification' ) );
+		$this->assertSame( 'uploads/2026/10/missing.jpg', $items->records[0]['canonical_object_key'] );
+		$this->assertSame( array(), $adopter->inventory );
+		$this->assertSame( 1, $result['objects_checked'] );
+		$this->assertNull( $result['estimated_remaining_seconds'] );
+	}
+
+	public function test_dry_run_uses_each_descriptor_result_instead_of_aggregate_order(): void {
+		$items = new CompetitorImportFakeRunItemRepository();
+		$adopter = new CompetitorImportFakeAdopter( array( 101 => array( 'adopted' => 1, 'missing' => 1, 'errors' => 0, 'conflicts' => 0, 'results' => array( array( 'relative' => '2026/10/first.jpg', 'key' => 'legacy/first.jpg', 'classification' => 'confirmed_missing' ), array( 'relative' => '2026/10/second.jpg', 'key' => 'legacy/second.jpg', 'classification' => 'verified_present' ) ) ) ) );
+		$importer = new CompetitorImportFakeImporter( 'wp_offload_media', array( new ImportScanPage( 10, 101, array( $this->descriptor( 101, '2026/10/first.jpg', 'legacy/first.jpg' ), $this->descriptor( 101, '2026/10/second.jpg', 'legacy/second.jpg' ) ) ) ) );
+		$service = $this->service( $importer, $adopter, null, null, null, $items );
+
+		$run = $service->start_dry_run( 'wp_offload_media', 12 );
+		$service->process_next_page( $run['uuid'], 10 );
+
+		$this->assertSame( array( 'confirmed_missing', 'verified_present' ), array_column( $items->records, 'classification' ) );
+	}
+
 	public function test_commit_requires_matching_completed_dry_run_fingerprint(): void {
 		$service = $this->service( new CompetitorImportFakeImporter( 'wp_offload_media' ) );
 
@@ -88,6 +118,39 @@ final class CompetitorImportServiceTest extends TestCase {
 		$wrong_profile = $service->start_commit( 'wp_offload_media', 12 );
 		$this->assertFalse( $wrong_profile['success'] );
 		$this->assertSame( 'matching_dry_run_required', $wrong_profile['code'] );
+	}
+
+	public function test_remediation_start_binds_the_new_run_to_the_completed_dry_run(): void {
+		$runs    = new CompetitorImportFakeRunRepository();
+		$service = $this->service( new CompetitorImportFakeImporter( 'wp_offload_media' ), null, null, $runs );
+
+		$dry_run = $service->start_dry_run( 'wp_offload_media', 12 );
+		$service->process_next_page( $dry_run['uuid'], 10 );
+		$remediation = $service->start_remediation_upload( $dry_run['uuid'] );
+
+		$this->assertTrue( $remediation['success'] );
+		$this->assertSame( 'remediate_upload', $remediation['mode'] );
+		$this->assertSame( $runs->find_by_uuid( $dry_run['uuid'] )['id'], $runs->find_by_uuid( $remediation['uuid'] )['source_run_id'] );
+	}
+
+	public function test_remediation_processes_only_eligible_ledger_rows_without_rescanning_source(): void {
+		$runs = new CompetitorImportFakeRunRepository();
+		$items = new CompetitorImportFakeRunItemRepository();
+		$remediator = new CompetitorImportFakeRemediator( new Settings() );
+		$importer = new CompetitorImportFakeImporter( 'wp_offload_media' );
+		$service = $this->service( $importer, null, null, $runs, null, $items, $remediator );
+		$dry_run = $service->start_dry_run( 'wp_offload_media', 12 );
+		$service->process_next_page( $dry_run['uuid'], 10 );
+		$items->eligible_rows = array( array( 'id' => 41, 'attachment_id' => 101, 'classification' => 'confirmed_missing', 'local_relative_path' => '2026/10/photo.jpg', 'canonical_object_key' => 'uploads/2026/10/photo.jpg' ) );
+		$remediation = $service->start_remediation_upload( $dry_run['uuid'] );
+		$source_scans_before = count( $importer->scan_after_attachment_ids );
+
+		$result = $service->process_next_page( $remediation['uuid'], 10 );
+
+		$this->assertSame( 1, $result['verified'] );
+		$this->assertSame( 41, $result['after_item_id'] );
+		$this->assertSame( $source_scans_before, count( $importer->scan_after_attachment_ids ) );
+		$this->assertSame( array( 41 ), array_column( $remediator->items, 'id' ) );
 	}
 
 	public function test_start_rejects_second_active_import_run_for_same_source_and_profile(): void {
@@ -668,9 +731,11 @@ final class CompetitorImportServiceTest extends TestCase {
 		?CompetitorImportFakeAdopter $adopter = null,
 		?AuditLog $audit = null,
 		?CompetitorImportFakeRunRepository $runs = null,
-		?ImportRegistry $registry = null
+		?ImportRegistry $registry = null,
+		?CompetitorImportFakeRunItemRepository $items = null,
+		?CompetitorImportFakeRemediator $remediator = null
 	): CompetitorImportService {
-		return $this->service_with_profile( $importer, $adopter, 'aws', 'https://s3.example.test', $audit, $runs, $registry );
+		return $this->service_with_profile( $importer, $adopter, 'aws', 'https://s3.example.test', $audit, $runs, $registry, $items, $remediator );
 	}
 
 	private function service_with_profile(
@@ -680,7 +745,9 @@ final class CompetitorImportServiceTest extends TestCase {
 		string $endpoint,
 		?AuditLog $audit = null,
 		?CompetitorImportFakeRunRepository $runs = null,
-		?ImportRegistry $registry = null
+		?ImportRegistry $registry = null,
+		?CompetitorImportFakeRunItemRepository $items = null,
+		?CompetitorImportFakeRemediator $remediator = null
 	): CompetitorImportService {
 		$profiles = $this->createMock( WpdbStorageProfileRepository::class );
 		$profiles->method( 'find' )->willReturnCallback(
@@ -713,7 +780,9 @@ final class CompetitorImportServiceTest extends TestCase {
 			$adopter ?? new CompetitorImportFakeAdopter(),
 			$profiles,
 			new Settings(),
-			$audit ?? $this->createMock( AuditLog::class )
+		$audit ?? $this->createMock( AuditLog::class ),
+		$items ?? new CompetitorImportFakeRunItemRepository(),
+		$remediator
 		);
 	}
 
@@ -793,6 +862,7 @@ final class CompetitorImportFakeRunRepository extends ImportRunRepository {
 		$data['skipped']          = (int) ( $data['skipped'] ?? 0 );
 		$data['rejected']         = (int) ( $data['rejected'] ?? 0 );
 		$data['after_attachment_id'] = (int) ( $data['after_attachment_id'] ?? 0 );
+		$data['after_item_id'] = (int) ( $data['after_item_id'] ?? 0 );
 		$this->rows[ $id ]       = $data;
 		return $id;
 	}
@@ -816,6 +886,7 @@ final class CompetitorImportFakeRunRepository extends ImportRunRepository {
 		}
 		return null;
 	}
+	public function find_by_id( int $id ): ?array { return $this->rows[ $id ] ?? null; }
 
 	public function find_latest_successful_dry_run( string $source_type, int $profile_id, string $source_fingerprint ): ?array {
 		$matches = array_filter(
@@ -850,6 +921,23 @@ final class CompetitorImportFakeRunRepository extends ImportRunRepository {
 	}
 }
 
+final class CompetitorImportFakeRunItemRepository extends ImportRunItemRepository {
+	/** @var list<array<string,mixed>> */
+	public array $records = array();
+	/** @var list<array<string,mixed>> */
+	public array $eligible_rows = array();
+	public function record( int $run_id, ImportedObjectDescriptor $descriptor, string $classification, ?string $detail = null, string $canonical_object_key = '' ): void {
+		$this->records[] = array( 'import_run_id' => $run_id, 'attachment_id' => $descriptor->attachment_id(), 'classification' => $classification, 'detail' => $detail, 'canonical_object_key' => $canonical_object_key );
+	}
+	public function eligible_page( int $run_id, int $after_id, int $limit = 50 ): array { unset( $run_id ); return array_values( array_filter( $this->eligible_rows, static fn( array $row ): bool => (int) $row['id'] > $after_id ) ); }
+}
+
+final class CompetitorImportFakeRemediator extends ImportRemediationService {
+	/** @var list<array<string,mixed>> */
+	public array $items = array();
+	public function remediate_item( array $item, StorageProfile $profile ): array { unset( $profile ); $this->items[] = $item; return array( 'classification' => 'uploaded' ); }
+}
+
 final class CompetitorImportFakeAdopter extends AdoptAttachmentService {
 	/** @var array<int, array{adopted:int,missing:int,errors:int,conflicts:int}> */
 	public array $outcomes;
@@ -878,7 +966,7 @@ final class CompetitorImportFakeAdopter extends AdoptAttachmentService {
 			'missing'   => $outcome['missing'],
 			'errors'    => $outcome['errors'],
 			'conflicts' => $outcome['conflicts'],
-			'results'   => array(),
+			'results'   => $outcome['results'] ?? array(),
 		);
 	}
 

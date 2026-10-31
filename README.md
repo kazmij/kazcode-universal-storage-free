@@ -109,7 +109,7 @@ Amazon S3, Cloudflare R2, DigitalOcean Spaces, MinIO, Wasabi, Backblaze B2, and 
 
 ## Migration
 
-**Universal Storage → Migration** — batch-migrate existing attachments with dry-run, retry-failed, and verify modes. Large local uploads resume safely after interruption using durable multipart state. The same screen also imports existing inventory from **WP Offload Media**, **Advanced Media Offloader**, or **Media Cloud** (S3-compatible drivers with retained exact object keys): detection is read-only, a dry-run is mandatory before import, exact remote keys are HEAD-verified, and no credentials are copied from the other plugin. Imports never modify the other plugin's data. Large libraries should prefer WP-CLI (below) for unattended runs.
+**Universal Storage → Migration** — batch-migrate existing attachments with dry-run, retry-failed, and verify modes. Large local uploads resume safely after interruption using durable multipart state. The same screen also imports existing inventory from **WP Offload Media**, **Advanced Media Offloader**, or **Media Cloud** (S3-compatible drivers with retained exact object keys): detection is read-only, a dry-run is mandatory before import, exact remote keys are HEAD-verified, and no credentials are copied from the other plugin. When a verified dry run finds a remote object missing or a size conflict after an external bulk copy, the administrator may explicitly upload only the still-safe eligible local files; each row is revalidated and ownership-reserved before transfer, then HEAD-verified before it is marked present. This remediation never changes competitor metadata or deletes local files. Large libraries should prefer WP-CLI (below) for unattended runs.
 
 ## Health
 

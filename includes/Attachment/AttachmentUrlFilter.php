@@ -13,6 +13,7 @@ defined( 'ABSPATH' ) || exit;
 
 use Kazcode\WpStorage\Core\SecretRedactor;
 use Kazcode\WpStorage\Core\Settings;
+use Kazcode\WpStorage\Services\ProfileAwareObjectOperations;
 use Kazcode\WpStorage\Storage\ProfileDeliveryUrlResolver;
 use Kazcode\WpStorage\Storage\PublicUrlResolver;
 use Kazcode\WpStorage\Storage\S3KeyResolver;
@@ -26,13 +27,17 @@ final class AttachmentUrlFilter {
 	private Settings $settings;
 	private PublicUrlResolver $urls;
 	private ProfileDeliveryUrlResolver $profile_urls;
+	private ?ProfileAwareObjectOperations $profile_ops;
 	private S3KeyResolver $keys;
 	private ?S3Storage $storage;
+	/** @var array<string, array{0:string,1:int,2:int,3:bool}> */
+	private array $upstream_downsizes = array();
 
-	public function __construct(Settings $settings, PublicUrlResolver $urls, S3KeyResolver $keys, ?S3Storage $storage = null, ?ProfileDeliveryUrlResolver $profile_urls = null) {
+	public function __construct(Settings $settings, PublicUrlResolver $urls, S3KeyResolver $keys, ?S3Storage $storage = null, ?ProfileDeliveryUrlResolver $profile_urls = null, ?ProfileAwareObjectOperations $profile_ops = null) {
 		$this->settings     = $settings;
 		$this->urls         = $urls;
 		$this->profile_urls = $profile_urls ?? new ProfileDeliveryUrlResolver( fallback: $urls );
+		$this->profile_ops  = $profile_ops;
 		$this->keys         = $keys;
 		$this->storage      = $storage;
 	}
@@ -44,6 +49,7 @@ final class AttachmentUrlFilter {
 		add_filter('wp_get_attachment_url', array($this, 'filter_attachment_url'), 10, 2);
 		add_filter('wp_get_attachment_image_src', array($this, 'filter_image_src'), 10, 4);
 		add_filter('image_downsize', array($this, 'filter_image_downsize'), 10, 3);
+		add_filter('wp_calculate_image_srcset_meta', array($this, 'filter_srcset_metadata'), 10, 4);
 		add_filter('wp_calculate_image_srcset', array($this, 'filter_srcset'), 10, 5);
 		add_filter('wp_prepare_attachment_for_js', array($this, 'filter_prepare_for_js'), 10, 3);
 		add_filter('rest_prepare_attachment', array($this, 'filter_rest_prepare'), 10, 3);
@@ -87,9 +93,13 @@ final class AttachmentUrlFilter {
 	 * Filter full attachment URL.
 	 *
 	 * @param string $url URL.
-	 * @param int    $attachment_id Attachment ID.
+	 * @param mixed  $attachment_id Attachment ID from the WordPress hook.
 	 */
-	public function filter_attachment_url(string $url, int $attachment_id): string {
+	public function filter_attachment_url(string $url, $attachment_id): string {
+		$attachment_id = $this->valid_attachment_id( $attachment_id );
+		if ( $attachment_id === null ) {
+			return $url;
+		}
 		if (!$this->settings->is_serve_enabled()) {
 			return $url;
 		}
@@ -120,13 +130,30 @@ final class AttachmentUrlFilter {
 	 * Filter image src array.
 	 *
 	 * @param array{0:string,1:int,2:int,3:bool}|false $image Image data.
-	 * @param int                                       $attachment_id Attachment ID.
+	 * @param mixed                                     $attachment_id Attachment ID from the WordPress hook.
 	 * @param string|int[]                              $size Size.
 	 * @param bool                                      $icon Icon.
 	 * @return array{0:string,1:int,2:int,3:bool}|false
 	 */
-	public function filter_image_src($image, int $attachment_id, $size, bool $icon) {
+	public function filter_image_src($image, $attachment_id, $size, bool $icon) {
+		$attachment_id = $this->valid_attachment_id( $attachment_id );
+		if ( $attachment_id === null ) {
+			return $image;
+		}
 		if ($image === false || !$this->settings->is_serve_enabled()) {
+			return $image;
+		}
+		$key = $this->downsize_context_key( $attachment_id, $size );
+		if ( isset( $this->upstream_downsizes[ $key ] ) && $this->upstream_downsizes[ $key ] === $image ) {
+			return $image;
+		}
+		// image_downsize may already have yielded a usable URL from another
+		// integration. This filter owns only this site's canonical uploads URLs;
+		// an external/pre-resolved tuple remains the earlier callback's result.
+		if (
+			$this->uploads_relative_from_url( (string) ( $image[0] ?? '' ) ) === ''
+			&& (string) get_post_meta( $attachment_id, '_s3ms_status', true ) !== AttachmentOffloader::STATUS_PARTIAL
+		) {
 			return $image;
 		}
 
@@ -156,12 +183,20 @@ final class AttachmentUrlFilter {
 	 * Critical for Media Library Grid when local files are gone.
 	 *
 	 * @param bool|array{0:string,1:int,2:int,3:bool} $downsize Existing.
-	 * @param int                                     $attachment_id Attachment ID.
+	 * @param mixed                                   $attachment_id Attachment ID from the WordPress hook.
 	 * @param string|int[]                            $size Size.
 	 * @return bool|array{0:string,1:int,2:int,3:bool}
 	 */
-	public function filter_image_downsize($downsize, int $attachment_id, $size) {
-		if ($downsize !== false || !$this->settings->is_serve_enabled()) {
+	public function filter_image_downsize($downsize, $attachment_id, $size) {
+		$attachment_id = $this->valid_attachment_id( $attachment_id );
+		if ( $attachment_id === null ) {
+			return $downsize;
+		}
+		if ( $downsize !== false ) {
+			$this->upstream_downsizes[ $this->downsize_context_key( $attachment_id, $size ) ] = $downsize;
+			return $downsize;
+		}
+		if ( ! $this->settings->is_serve_enabled() ) {
 			return $downsize;
 		}
 		if (!$this->settings->has_public_url_config()) {
@@ -183,16 +218,46 @@ final class AttachmentUrlFilter {
 	}
 
 	/**
+	 * WordPress requires the current image URL to contain the metadata directory
+	 * before it will emit a srcset. A private Direct Upload original is signed
+	 * with its immutable attempt key instead, so let Core compare against that
+	 * key while the later srcset filter maps every candidate through inventory.
+	 *
+	 * @param array<string, mixed> $image_meta
+	 * @param array{0:int,1:int}   $size_array
+	 * @return array<string, mixed>
+	 */
+	public function filter_srcset_metadata( array $image_meta, array $size_array, string $image_src, $attachment_id ): array {
+		unset( $size_array );
+		$attachment_id = $this->valid_attachment_id( $attachment_id );
+		if ( $attachment_id === null || ! $this->settings->is_serve_enabled() || ! $this->settings->is_private_media() ) {
+			return $image_meta;
+		}
+		$attached = trim( str_replace( '\\', '/', (string) get_post_meta( $attachment_id, '_wp_attached_file', true ) ), '/' );
+		$key      = trim( str_replace( '\\', '/', (string) get_post_meta( $attachment_id, '_s3ms_original_key', true ) ), '/' );
+		$path     = function_exists( 'wp_parse_url' ) ? (string) wp_parse_url( $image_src, PHP_URL_PATH ) : (string) parse_url( $image_src, PHP_URL_PATH );
+		$path     = ltrim( rawurldecode( $path ), '/' );
+		if ( $attached !== '' && $key !== '' && ! str_contains( $image_src, $attached ) && str_ends_with( $path, $key ) ) {
+			$image_meta['file'] = $key;
+		}
+		return $image_meta;
+	}
+
+	/**
 	 * Replace srcset URLs with S3/CDN.
 	 *
 	 * @param array<string, array{url:string,descriptor:string,value:int}> $sources Sources.
 	 * @param array{0:int,1:int}                                           $size_array Size.
 	 * @param string                                                       $image_src Image src.
 	 * @param array<string, mixed>                                         $image_meta Meta.
-	 * @param int                                                          $attachment_id Attachment ID.
+	 * @param mixed                                                        $attachment_id Attachment ID from the WordPress hook.
 	 * @return array<string, array{url:string,descriptor:string,value:int}>
 	 */
-	public function filter_srcset(array $sources, array $size_array, string $image_src, array $image_meta, int $attachment_id): array {
+	public function filter_srcset(array $sources, array $size_array, string $image_src, array $image_meta, $attachment_id): array {
+		$attachment_id = $this->valid_attachment_id( $attachment_id );
+		if ( $attachment_id === null ) {
+			return $sources;
+		}
 		if (!$this->settings->is_serve_enabled() || $sources === array()) {
 			return $sources;
 		}
@@ -338,12 +403,12 @@ final class AttachmentUrlFilter {
 	 *
 	 * @param string $filtered_image Full <img> tag.
 	 * @param string $context        Filter context (e.g. the_content).
-	 * @param int    $attachment_id  ID from the wp-image-{ID} class, 0 if none.
+	 * @param mixed  $attachment_id  ID from the wp-image-{ID} class, 0 if none.
 	 */
 	public function filter_content_img_tag($filtered_image, $context, $attachment_id): string {
 		$tag = (string) $filtered_image;
-		$id  = (int) $attachment_id;
-		if ($id <= 0 || !$this->settings->is_serve_enabled() || !$this->settings->has_public_url_config()) {
+		$id  = $this->valid_attachment_id( $attachment_id );
+		if ($id === null || !$this->settings->is_serve_enabled() || !$this->settings->has_public_url_config()) {
 			return $tag;
 		}
 		if (!preg_match('/\ssrc=(["\'])([^"\']+)\1/i', $tag, $match)) {
@@ -396,22 +461,40 @@ final class AttachmentUrlFilter {
 	}
 
 	/**
+	 * Public WordPress hooks are an integration boundary: third-party callbacks
+	 * can pass arbitrary values. Only a positive native integer is a safe
+	 * attachment identity; coercing strings or booleans could resolve a different
+	 * attachment and must never happen.
+	 *
+	 * @param mixed $attachment_id Value provided by a WordPress filter.
+	 */
+	private function valid_attachment_id( $attachment_id ): ?int {
+		return is_int( $attachment_id ) && $attachment_id > 0 ? $attachment_id : null;
+	}
+
+	/**
 	 * Public or signed URL for a relative uploads path.
 	 */
 	private function serve_url_for_relative( string $relative, int $attachment_id ): string {
 		if ( ! $this->should_serve_relative( $attachment_id, $relative ) ) {
 			return '';
 		}
-		if ( $this->settings->is_private_media() && $this->storage !== null ) {
+		if ( $this->settings->is_private_media() ) {
 			try {
-				return $this->storage->presigned_url_for_relative( $relative, $this->settings->signed_url_ttl() );
+				$private_url = $this->profile_ops?->presigned_url_for_attachment_relative( $attachment_id, $relative, $this->settings->signed_url_ttl() ) ?? '';
+				if ( $private_url !== '' ) {
+					return $private_url;
+				}
+				if ( $this->storage !== null ) {
+					return $this->storage->presigned_url_for_relative( $relative, $this->settings->signed_url_ttl() );
+				}
 			} catch ( \Throwable $e ) {
 				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 					// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 					error_log( 'KAZCODE Universal Storage presigned URL failed for ' . $relative . ': ' . SecretRedactor::redact( $e ) );
 				}
-				return '';
 			}
+			return '';
 		}
 		return $this->profile_urls->url_for_attachment_relative( $attachment_id, $relative );
 	}
@@ -447,6 +530,20 @@ final class AttachmentUrlFilter {
 		}
 		$attached = (string) get_post_meta($attachment_id, '_wp_attached_file', true);
 		return (bool) preg_match('/\.(jpe?g|png|gif|webp|avif|heic|heif|bmp|tiff?|ico)$/i', $attached);
+	}
+
+	/**
+	 * A request-local key linking a preserved image_downsize tuple to the later
+	 * wp_get_attachment_image_src call WordPress makes for the same attachment.
+	 * No state is persisted across requests.
+	 *
+	 * @param string|int[] $size Requested image size.
+	 */
+	private function downsize_context_key( int $attachment_id, $size ): string {
+		if ( is_array( $size ) ) {
+			return $attachment_id . '|array:' . (int) ( $size[0] ?? 0 ) . 'x' . (int) ( $size[1] ?? 0 );
+		}
+		return $attachment_id . '|name:' . (string) $size;
 	}
 
 	/**
@@ -500,6 +597,14 @@ final class AttachmentUrlFilter {
 				'height'          => (int) ($meta['sizes'][ $size_name ]['height'] ?? 0),
 				'is_intermediate' => true,
 			);
+		}
+
+		// A third-party callback may ask for a named derivative that this
+		// attachment never generated. Do not replace that missing exact variant
+		// with the original remote object: WordPress (or the earlier callback)
+		// must retain control of its own fallback decision.
+		if ( ! in_array( $size_name, array( 'thumbnail', 'medium', 'medium_large', 'large' ), true ) ) {
+			return null;
 		}
 
 		// Fallback to full.

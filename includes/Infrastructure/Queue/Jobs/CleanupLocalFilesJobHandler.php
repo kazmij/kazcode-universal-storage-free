@@ -51,7 +51,7 @@ final class CleanupLocalFilesJobHandler implements JobHandlerInterface {
 		$plugin   = Plugin::instance();
 		$files    = new AttachmentFileResolver( $plugin->key_resolver() );
 		$manifest = ( new ManifestBuilder( $files ) )->build( $attachment_id );
-		$local    = $files->existing_local_files( $attachment_id );
+		$local    = $files->existing_local_files_for_manifest_paths( $manifest->relative_paths() );
 		if ( $local === array() ) {
 			return array(
 				'success' => true,

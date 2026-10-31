@@ -106,9 +106,27 @@ final class AttachmentFileResolver {
 	 * @return array<string, string> Map relative => absolute for existing files.
 	 */
 	public function existing_local_files(int $attachment_id, ?array $metadata_override = null): array {
+		return $this->existing_local_files_for_manifest_paths( $this->relative_paths( $attachment_id, $metadata_override ) );
+	}
+
+	/**
+	 * Existing local files for an already-derived manifest path set.
+	 *
+	 * ManifestBuilder is the authoritative extension boundary for sidecar
+	 * variants. Keeping this resolver focused on safe path-to-file conversion
+	 * avoids duplicating its hooks or scanning unrelated upload-directory files.
+	 *
+	 * @param list<string> $relative_paths Normalized-or-candidate relative paths.
+	 * @return array<string, string> Map relative => absolute for existing files.
+	 */
+	public function existing_local_files_for_manifest_paths( array $relative_paths ): array {
 		$found = array();
 
-		foreach ($this->relative_paths($attachment_id, $metadata_override) as $relative) {
+		foreach ( $relative_paths as $relative ) {
+			$relative = $this->keys->try_normalize_relative( $relative );
+			if ( $relative === '' ) {
+				continue;
+			}
 			$absolute = \Kazcode\WpStorage\Storage\PathGuard::absolute_under_uploads($relative);
 			if ($absolute !== null && is_file($absolute)) {
 				$found[ $relative ] = $absolute;

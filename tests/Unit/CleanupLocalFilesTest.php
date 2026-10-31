@@ -93,6 +93,22 @@ final class CleanupLocalFilesTest extends TestCase {
 		);
 	}
 
+	public function test_unverified_hook_contributed_sidecar_blocks_remote_only_cleanup(): void {
+		$settings = $this->settings_with_policy( LocalStoragePolicy::REMOTE_ONLY );
+		$files    = $this->sample_files();
+		$sidecar  = $this->touch( '2026/08/photo.webp' );
+		$files['2026/08/photo.webp'] = $sidecar;
+		$manifest = array_merge( $this->manifest_items(), array( array( 'relative' => '2026/08/photo.webp', 'variant_type' => 'webp' ) ) );
+
+		$result = $this->cleanup( $settings, $this->eligibility( false, 'remote_not_verified', '2026/08/photo.webp' ) )
+			->maybe_cleanup( 41, $files, $manifest, null );
+
+		$this->assertTrue( $result['skipped'] );
+		$this->assertSame( 'remote_not_verified', $result['blocked_reason'] );
+		$this->assertFileExists( $files['2026/08/photo.jpg'] );
+		$this->assertFileExists( $sidecar );
+	}
+
 	public function test_metadata_changed_after_verification_blocks_stale_deletion(): void {
 		$settings = $this->settings_with_policy( LocalStoragePolicy::REMOTE_ONLY );
 		$files    = $this->sample_files();

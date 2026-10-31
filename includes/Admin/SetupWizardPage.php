@@ -73,7 +73,7 @@ final class SetupWizardPage {
 	 */
 	public function save(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Forbidden.', 'kazcode-universal-storage' ) );
+			wp_die( esc_html__( 'Forbidden.', 'kazcode-universal-storage' ), '', array( 'response' => 403 ) );
 		}
 		check_admin_referer( 'kazus_wizard' );
 

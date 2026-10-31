@@ -113,7 +113,8 @@ printf '%s\n' "${KAZUS_WPORG_PASSWORD}" | svn commit "${TMP}/svn" \
 	-m "Release ${VERSION}: safe media offload and provider migration" \
 	--username "${KAZUS_WPORG_USERNAME}" \
 	--password-from-stdin \
-	--no-auth-cache
+	--no-auth-cache \
+	--config-option servers:global:http-timeout=1800
 
 PUBLIC_ZIP="${TMP}/kazcode-universal-storage.${VERSION}.zip"
 curl -fsSL "https://downloads.wordpress.org/plugin/kazcode-universal-storage.${VERSION}.zip" -o "${PUBLIC_ZIP}"

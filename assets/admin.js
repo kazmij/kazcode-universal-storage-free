@@ -549,6 +549,7 @@
 			importButton('detect').disabled = running || paused || commitFinished;
 			importButton('analyze').disabled = !pair.source || !pair.profile || running || commitFinished;
 			importButton('commit').disabled = !completedMatchingDryRun || running || paused || commitFinished;
+			importButton('remediate').disabled = !completedMatchingDryRun || running || paused || commitFinished;
 			importButton('pause').disabled = !run || !run.uuid || !running;
 			importButton('resume').disabled = !run || !run.uuid || !paused;
 			importButton('cancel').disabled = !run || !run.uuid || (!running && !paused);
@@ -588,7 +589,7 @@
 
 			if (run.mode === 'dry_run') {
 				setWizardState(run.status === 'completed' ? 'import' : 'analyze');
-			} else if (run.mode === 'commit') {
+			} else if (run.mode === 'commit' || run.mode === 'remediate_upload') {
 				setWizardState(run.status === 'completed' ? 'report' : 'import');
 			}
 			setImportStatus('Import ' + run.mode + ' is ' + run.status + '.', run.status !== 'failed' && run.status !== 'cancelled');
@@ -606,7 +607,7 @@
 				return;
 			}
 			try {
-				var run = await get('imports/' + encodeURIComponent(currentRun.uuid));
+				var run = await post('imports/' + encodeURIComponent(currentRun.uuid) + '/process', {});
 				currentRun = Object.assign({}, currentRun, run);
 				renderImportRun(currentRun);
 				if (currentRun.mode === 'dry_run' && currentRun.status === 'completed') {
@@ -682,6 +683,18 @@
 			beginImportPolling(run, pair);
 		}
 
+		async function startRemediationRun() {
+			if (!completedDryRun || !completedDryRun.uuid) {
+				setImportStatus('Complete a matching analysis before uploading eligible local files.', false);
+				return;
+			}
+			setWizardState('import');
+			setImportStatus(s3msAdmin.i18n.running || 'Running...', true);
+			enableImportControls({ status: 'running' });
+			var run = await post('imports/' + encodeURIComponent(completedDryRun.uuid) + '/remediation/start', {});
+			beginImportPolling(run, completedDryRun.pair);
+		}
+
 		async function transitionImportRun(action) {
 			if (!currentRun || !currentRun.uuid) {
 				return;
@@ -702,6 +715,8 @@
 						await startImportRun('dry_run');
 					} else if (action === 'commit') {
 						await startImportRun('commit');
+					} else if (action === 'remediate') {
+						await startRemediationRun();
 					} else {
 						await transitionImportRun(action);
 					}

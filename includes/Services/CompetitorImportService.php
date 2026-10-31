@@ -18,7 +18,9 @@ use Kazcode\WpStorage\Import\ImportedObjectDescriptor;
 use Kazcode\WpStorage\Import\ImporterInterface;
 use Kazcode\WpStorage\Import\ImportRegistry;
 use Kazcode\WpStorage\Infrastructure\ImportRunRepository;
+use Kazcode\WpStorage\Infrastructure\ImportRunItemRepository;
 use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
+use Kazcode\WpStorage\Storage\ObjectKeyService;
 use Kazcode\WpStorage\Storage\ProfileStorageGateway;
 
 /**
@@ -32,13 +34,17 @@ final class CompetitorImportService {
 		private ?AdoptAttachmentService $adopter = null,
 		private ?WpdbStorageProfileRepository $profiles = null,
 		private ?Settings $settings = null,
-		private ?AuditLog $audit = null
+		private ?AuditLog $audit = null,
+		private ?ImportRunItemRepository $items = null,
+		private ?ImportRemediationService $remediator = null
 	) {
 		$this->registry = $registry ?? ImportRegistry::defaults();
 		$this->runs     = $runs ?? new ImportRunRepository();
 		$this->profiles = $profiles ?? new WpdbStorageProfileRepository();
 		$this->settings = $settings ?? new Settings();
 		$this->audit    = $audit ?? new AuditLog();
+		$this->items    = $items ?? new ImportRunItemRepository();
+		$this->remediator = $remediator ?? new ImportRemediationService( $this->settings );
 		if ( $this->adopter === null ) {
 			$settings = $this->settings;
 			$this->adopter = new AdoptAttachmentService(
@@ -92,6 +98,23 @@ final class CompetitorImportService {
 		return $this->create_run( 'commit', $source_type, $profile_id, $fingerprint );
 	}
 
+	/** Start an explicit upload-only remediation for one completed, unchanged dry run. */
+	public function start_remediation_upload( string $dry_run_uuid ): array {
+		$dry_run = $this->runs->find_by_uuid( $dry_run_uuid );
+		if ( $dry_run === null || (string) ( $dry_run['mode'] ?? '' ) !== 'dry_run' || (string) ( $dry_run['status'] ?? '' ) !== ImportRunStatus::COMPLETED ) {
+			return $this->error( 'matching_dry_run_required', 'Remediation requires a completed dry run.' );
+		}
+		$importer = $this->importer( (string) $dry_run['source_type'] );
+		$profile  = $this->profiles->find( (int) $dry_run['profile_id'] );
+		if ( $importer === null || ! $profile instanceof StorageProfile || $profile->id === null || ! hash_equals( (string) $dry_run['source_fingerprint'], $this->source_fingerprint( $importer, $profile ) ) ) {
+			return $this->error( 'matching_dry_run_required', 'Remediation requires unchanged source and profile configuration.' );
+		}
+		if ( $this->runs->find_active() !== null ) {
+			return $this->error( 'active_import_run_exists', 'An import run is already active for this source/profile.', $this->runs->find_active() );
+		}
+		return $this->create_run( 'remediate_upload', (string) $dry_run['source_type'], (int) $dry_run['profile_id'], (string) $dry_run['source_fingerprint'], (int) $dry_run['id'] );
+	}
+
 	/** @return array<string, mixed> */
 	public function process_next_page( string $uuid, int $limit = 50 ): array {
 		$run = $this->runs->find_by_uuid( $uuid );
@@ -103,6 +126,9 @@ final class CompetitorImportService {
 		}
 		if ( in_array( (string) $run['status'], array( ImportRunStatus::COMPLETED, ImportRunStatus::CANCELLED, ImportRunStatus::FAILED ), true ) ) {
 			return $this->run_response( $run );
+		}
+		if ( (string) $run['mode'] === 'remediate_upload' ) {
+			return $this->process_remediation_page( $run, $limit );
 		}
 
 		$importer = $this->importer( (string) $run['source_type'] );
@@ -155,6 +181,7 @@ final class CompetitorImportService {
 			$counts['missing']          += (int) ( $result['missing'] ?? 0 );
 			$counts['transient_errors'] += (int) ( $result['errors'] ?? 0 );
 			$counts['conflicts']        += (int) ( $result['conflicts'] ?? 0 );
+			$this->record_descriptor_outcomes( (int) $run['id'], $profile, $descriptors, $result );
 		}
 
 		$status = $page->cursor() <= $after_attachment_id ? ImportRunStatus::COMPLETED : ImportRunStatus::RUNNING;
@@ -242,7 +269,7 @@ final class CompetitorImportService {
 	}
 
 	/** @return array<string, mixed> */
-	private function create_run( string $mode, string $source_type, int $profile_id, string $fingerprint ): array {
+	private function create_run( string $mode, string $source_type, int $profile_id, string $fingerprint, ?int $source_run_id = null ): array {
 		$uuid = $this->uuid();
 		$data = array(
 			'uuid'                => $uuid,
@@ -251,6 +278,7 @@ final class CompetitorImportService {
 			'mode'                => $mode,
 			'status'              => ImportRunStatus::RUNNING,
 			'after_attachment_id' => 0,
+			'after_item_id'       => 0,
 			'processed'           => 0,
 			'verified'            => 0,
 			'missing'             => 0,
@@ -261,6 +289,7 @@ final class CompetitorImportService {
 			'source_fingerprint'  => $fingerprint,
 			'started_at'          => gmdate( 'Y-m-d H:i:s' ),
 		);
+		if ( $source_run_id !== null ) $data['source_run_id'] = $source_run_id;
 		$id = $this->runs->create_if_no_active( $data );
 		if ( $id <= 0 ) {
 			return $this->error( 'active_import_run_exists', 'An import run is already active for this source/profile.', $this->runs->find_active() );
@@ -433,6 +462,74 @@ final class CompetitorImportService {
 		return $grouped;
 	}
 
+	/** @param array<string,mixed> $run @return array<string,mixed> */
+	private function process_remediation_page( array $run, int $limit ): array {
+		$source_run_id = (int) ( $run['source_run_id'] ?? 0 );
+		$source_run = $source_run_id > 0 ? $this->runs->find_by_id( $source_run_id ) : null;
+		if ( $source_run === null || (string) ( $source_run['mode'] ?? '' ) !== 'dry_run' || (string) ( $source_run['status'] ?? '' ) !== ImportRunStatus::COMPLETED ) {
+			$this->runs->update( (int) $run['id'], array( 'status' => ImportRunStatus::FAILED, 'last_error_message' => 'The remediation source dry run is unavailable.' ) );
+			return $this->error( 'matching_dry_run_required', 'The remediation source dry run is unavailable.', $this->runs->find_by_uuid( (string) $run['uuid'] ) ?? $run );
+		}
+		$profile = $this->profiles->find( (int) $run['profile_id'] );
+		if ( ! $profile instanceof StorageProfile ) {
+			return $this->error( 'profile_not_found', 'Storage profile not found.', $run );
+		}
+		$limit = max( 1, min( 200, $limit ) );
+		$page = $this->items->eligible_page( $source_run_id, (int) ( $run['after_item_id'] ?? 0 ), $limit );
+		$counts = array( 'processed' => 0, 'verified' => 0, 'missing' => 0, 'transient_errors' => 0, 'conflicts' => 0 );
+		$after = (int) ( $run['after_item_id'] ?? 0 );
+		foreach ( $page as $item ) {
+			$result = $this->remediator->remediate_item( $item, $profile );
+			++$counts['processed'];
+			$after = max( $after, (int) ( $item['id'] ?? 0 ) );
+			if ( ( $result['classification'] ?? '' ) === 'uploaded' ) ++$counts['verified'];
+			elseif ( ( $result['classification'] ?? '' ) === 'conflict' ) ++$counts['conflicts'];
+			else ++$counts['transient_errors'];
+		}
+		$status = count( $page ) < $limit ? ImportRunStatus::COMPLETED : ImportRunStatus::RUNNING;
+		$update = array( 'status' => $status, 'after_item_id' => $after, 'processed' => (int) $run['processed'] + $counts['processed'], 'verified' => (int) $run['verified'] + $counts['verified'], 'missing' => (int) $run['missing'], 'transient_errors' => (int) $run['transient_errors'] + $counts['transient_errors'], 'conflicts' => (int) $run['conflicts'] + $counts['conflicts'] );
+		if ( $status === ImportRunStatus::COMPLETED ) $update['finished_at'] = gmdate( 'Y-m-d H:i:s' );
+		$this->runs->update( (int) $run['id'], $update );
+		return $this->run_response( $this->runs->find_by_uuid( (string) $run['uuid'] ) ?? array_merge( $run, $update ) );
+	}
+
+	/** @param list<ImportedObjectDescriptor> $descriptors @param array<string,mixed> $result */
+	private function record_descriptor_outcomes( int $run_id, StorageProfile $profile, array $descriptors, array $result ): void {
+		$by_identity = array();
+		foreach ( (array) ( $result['results'] ?? array() ) as $row ) {
+			if ( ! is_array( $row ) ) {
+				continue;
+			}
+			$relative = (string) ( $row['relative'] ?? '' );
+			$key      = (string) ( $row['key'] ?? '' );
+			$class    = (string) ( $row['classification'] ?? '' );
+			if ( $relative !== '' && $key !== '' && in_array( $class, array( 'verified_present', 'confirmed_missing', 'transient_error', 'conflict' ), true ) ) {
+				$by_identity[ $relative . "\0" . $key ] = $class;
+			}
+		}
+		$remaining = array(
+			'verified_present' => (int) ( $result['adopted'] ?? 0 ),
+			'confirmed_missing' => (int) ( $result['missing'] ?? 0 ),
+			'transient_error' => (int) ( $result['errors'] ?? 0 ),
+			'conflict' => (int) ( $result['conflicts'] ?? 0 ),
+		);
+		foreach ( $descriptors as $descriptor ) {
+			$identity       = $descriptor->wp_relative_path() . "\0" . $descriptor->source_object_key();
+			$classification = $by_identity[ $identity ] ?? '';
+			if ( $classification === '' ) {
+				$classification = 'conflict';
+				foreach ( array( 'verified_present', 'confirmed_missing', 'transient_error', 'conflict' ) as $candidate ) {
+					if ( $remaining[ $candidate ] > 0 ) {
+						$classification = $candidate;
+						--$remaining[ $candidate ];
+						break;
+					}
+				}
+			}
+			$this->items->record( $run_id, $descriptor, $classification, null, ObjectKeyService::key_for( $profile->prefix, $descriptor->wp_relative_path() ) );
+		}
+	}
+
 	/**
 	 * @param array<string, mixed> $run
 	 * @return array<string, mixed>
@@ -447,6 +544,7 @@ final class CompetitorImportService {
 			'mode'               => (string) $run['mode'],
 			'status'             => (string) $run['status'],
 			'after_attachment_id' => (int) ( $run['after_attachment_id'] ?? 0 ),
+			'after_item_id'       => (int) ( $run['after_item_id'] ?? 0 ),
 			'processed'          => (int) ( $run['processed'] ?? 0 ),
 			'verified'           => (int) ( $run['verified'] ?? 0 ),
 			'missing'            => (int) ( $run['missing'] ?? 0 ),
@@ -454,6 +552,9 @@ final class CompetitorImportService {
 			'conflicts'          => (int) ( $run['conflicts'] ?? 0 ),
 			'skipped'            => (int) ( $run['skipped'] ?? 0 ),
 			'rejected'           => (int) ( $run['rejected'] ?? 0 ),
+			'objects_checked'    => (int) ( $run['verified'] ?? 0 ) + (int) ( $run['missing'] ?? 0 ) + (int) ( $run['transient_errors'] ?? 0 ) + (int) ( $run['conflicts'] ?? 0 ),
+			'elapsed_seconds'    => max( 0, time() - (int) strtotime( (string) ( $run['started_at'] ?? 'now' ) ) ),
+			'estimated_remaining_seconds' => null,
 		);
 		if ( $failed ) {
 			$response['code']    = 'import_run_failed';

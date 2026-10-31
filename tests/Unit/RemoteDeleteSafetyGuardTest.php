@@ -43,6 +43,32 @@ final class RemoteDeleteSafetyGuardTest extends TestCase {
 		$this->assertSame( array( 'uploads/2026/08/photo.jpg' ), $result['keys'] );
 	}
 
+	public function test_includes_hook_contributed_sidecar_when_attachment_is_cloud_only(): void {
+		$this->attachment( 10, '2026/08/photo.jpg' );
+		add_filter(
+			'kazus_manifest_files',
+			static fn( array $files, int $attachment_id ): array => $attachment_id === 10
+				? array_merge( $files, array( array( 'relative' => '2026/08/photo.jpg.webp', 'variant_type' => 'optimizer' ) ) )
+				: $files,
+			10,
+			2
+		);
+		$guard = $this->guard_with_rows(
+			array(
+				$this->row( 10, 1, 'uploads/2026/08/photo.jpg', '2026/08/photo.jpg' ),
+				$this->row( 10, 1, 'uploads/2026/08/photo.jpg.webp', '2026/08/photo.jpg.webp' ),
+			)
+		);
+
+		$result = $guard->evaluate( 10 );
+
+		$this->assertSame( RemoteDeleteSafetyGuard::SAFE_TO_DELETE, $result['status'] );
+		$this->assertSame(
+			array( 'uploads/2026/08/photo.jpg', 'uploads/2026/08/photo.jpg.webp' ),
+			$result['keys']
+		);
+	}
+
 	public function test_returns_shared_reference_when_another_attachment_has_same_attached_file(): void {
 		$this->attachment( 10, '2026/08/photo.jpg' );
 		$this->attachment( 11, '2026/08/photo.jpg' );

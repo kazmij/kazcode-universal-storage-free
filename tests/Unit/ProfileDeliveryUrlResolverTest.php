@@ -155,6 +155,22 @@ final class ProfileDeliveryUrlResolverTest extends TestCase {
 		$this->assertSame( 'https://old.cdn.example/2026/08/photo.jpg', $url );
 	}
 
+	public function test_cdn_without_prefix_uses_the_actual_object_path_relative_to_its_profile_prefix(): void {
+		$profile = $this->cdn_profile( 9, 'https://media.example.test' );
+		$resolver = new ProfileDeliveryUrlResolver();
+
+		$this->assertSame(
+			'https://media.example.test/2026/10/photo.jpg',
+			$resolver->url_for_profile_key( $profile, 'uploads/2026/10/photo.jpg', '2026/10/photo.jpg' ),
+			'Canonical offload keys retain the established prefix-omitting CDN URL.'
+		);
+		$this->assertSame(
+			'https://media.example.test/private/direct-upload/session/attempt/photo.jpg',
+			$resolver->url_for_profile_key( $profile, 'uploads/private/direct-upload/session/attempt/photo.jpg', '2026/10/photo.jpg' ),
+			'A Direct Upload original must resolve from its inventory object key, not a fabricated canonical uploads path.'
+		);
+	}
+
 	public function test_prefers_present_row_over_stale_row_after_migration(): void {
 		// Regression: a Pro storage-profile migration marks the old profile's row
 		// `stale` rather than deleting it, so the same relative path can match two

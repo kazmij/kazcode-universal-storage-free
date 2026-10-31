@@ -157,6 +157,39 @@ final class VerificationObservationTest extends TestCase {
 		$this->assertNotEmpty( $result['missing'] );
 	}
 
+	public function test_missing_hook_contributed_sidecar_blocks_a_verified_result(): void {
+		$original = '2026/08/photo.jpg';
+		$sidecar  = '2026/08/photo.jpg.webp';
+		$this->attachment( 208, $original );
+		file_put_contents( $this->uploads . '/' . $original, 'jpeg' );
+		file_put_contents( $this->uploads . '/' . $sidecar, 'webp' );
+		add_filter(
+			'kazus_manifest_files',
+			static function ( array $items ) use ( $sidecar ): array {
+				$items[] = array( 'relative' => $sidecar, 'variant_type' => 'sidecar' );
+				return $items;
+			}
+		);
+
+		$ops = $this->createMock( ProfileAwareObjectOperations::class );
+		$ops->expects( $this->exactly( 2 ) )->method( 'head_attachment_relative' )
+			->willReturnCallback(
+				static function ( int $attachment_id, string $relative ) use ( $original, $sidecar ): array {
+					unset( $attachment_id );
+					if ( $relative === $sidecar ) {
+						return array( 'exists' => false, 'confirmed_missing' => true );
+					}
+					return array( 'exists' => $relative === $original, 'content_length' => 4 );
+				}
+			);
+
+		$result = ( new VerificationService( $this->settings(), $this->legacy_storage(), null, $ops, $this->empty_objects() ) )->verify( 208 );
+
+		$this->assertSame( 'partial_offload', $result['status'] );
+		$this->assertSame( array( $sidecar ), $result['missing'] );
+		$this->assertSame( '', get_post_meta( 208, '_s3ms_verified_at', true ) );
+	}
+
 	public function test_inventory_size_enables_size_verified_when_local_missing(): void {
 		$this->attachment( 205, '2026/08/photo.jpg' );
 		WpStubs::set_meta( 205, '_s3ms_status', AttachmentOffloader::STATUS_OFFLOADED );

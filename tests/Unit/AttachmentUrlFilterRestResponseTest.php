@@ -33,7 +33,11 @@ namespace Kazcode\WpStorage\Tests {
 	use Kazcode\WpStorage\Domain\StorageProfile;
 	use Kazcode\WpStorage\Infrastructure\ObjectRepository;
 	use Kazcode\WpStorage\Infrastructure\WpdbStorageProfileRepository;
+	use Kazcode\WpStorage\Services\ProfileAwareObjectOperations;
+	use Kazcode\WpStorage\Services\ProfileObjectLocation;
+	use Kazcode\WpStorage\Services\ProfileObjectLocator;
 	use Kazcode\WpStorage\Storage\ProfileDeliveryUrlResolver;
+	use Kazcode\WpStorage\Storage\ProfileStorageGateway;
 	use Kazcode\WpStorage\Storage\PublicUrlResolver;
 	use Kazcode\WpStorage\Storage\S3KeyResolver;
 	use Kazcode\WpStorage\Storage\S3Storage;
@@ -120,6 +124,27 @@ namespace Kazcode\WpStorage\Tests {
 			);
 
 			$this->assertSame( 90, $filter->filter_attachment_url_to_postid( null, 'https://media.example.test/2026/10/photo.jpg' ) );
+		}
+
+		/**
+		 * Third-party media integrations occasionally send arbitrary values to
+		 * WordPress filters. They are not attachment IDs merely because PHP can
+		 * coerce them: Core callbacks must preserve the preceding result without a
+		 * fatal error or an accidental lookup of attachment 71/1 (#164).
+		 */
+		public function test_media_url_callbacks_preserve_original_values_for_invalid_external_attachment_ids(): void {
+			$filter  = $this->filter();
+			$image   = array( 'https://upstream.example/image.jpg', 320, 180, true );
+			$sources = array( '320' => array( 'url' => 'https://upstream.example/image.jpg', 'descriptor' => 'w', 'value' => 320 ) );
+			$tag     = '<img src="http://example.test/uploads/2026/10/photo.jpg" class="wp-image-71" />';
+
+			foreach ( array( null, '', '71', '71abc', 0, -1, true, new \stdClass() ) as $invalid_id ) {
+				$this->assertSame( 'https://upstream.example/original.jpg', $filter->filter_attachment_url( 'https://upstream.example/original.jpg', $invalid_id ) );
+				$this->assertSame( $image, $filter->filter_image_src( $image, $invalid_id, 'medium', false ) );
+				$this->assertFalse( $filter->filter_image_downsize( false, $invalid_id, 'medium' ) );
+				$this->assertSame( $sources, $filter->filter_srcset( $sources, array( 320, 180 ), $image[0], array(), $invalid_id ) );
+				$this->assertSame( $tag, $filter->filter_content_img_tag( $tag, 'the_content', $invalid_id ) );
+			}
 		}
 
 		/**
@@ -218,6 +243,87 @@ namespace Kazcode\WpStorage\Tests {
 
 			$this->assertIsArray( $downsize );
 			$this->assertSame( 'http://minio-loopback/2026/10/small.png', $downsize[0] );
+		}
+
+		/**
+		 * A provider, optimizer, or page builder may have resolved its own exact
+		 * variant before KAZCODE runs. That usable WordPress result owns the
+		 * request and must survive our callback unchanged.
+		 */
+		public function test_image_downsize_preserves_a_valid_upstream_tuple_byte_for_byte(): void {
+			$upstream = array( 'https://images.example.test/custom-150x150.webp', 150, 150, true );
+
+			$this->assertSame( $upstream, $this->filter()->filter_image_downsize( $upstream, 75, 'thumbnail' ) );
+		}
+
+		/**
+		 * A cloud-only image may use a remote derivative only when its exact
+		 * requested size is present in attachment metadata.
+		 */
+		public function test_image_downsize_serves_the_exact_remote_thumbnail_variant_for_a_cloud_only_image(): void {
+			WpStubs::$post_meta[77] = array(
+				'_s3ms_status'            => AttachmentOffloader::STATUS_OFFLOADED,
+				'_wp_attached_file'       => '2026/10/cloud-only.jpg',
+				'_wp_attachment_metadata' => array(
+					'width'  => 1800,
+					'height' => 1200,
+					'sizes'  => array(
+						'thumbnail' => array(
+							'file'   => 'cloud-only-150x150.jpg',
+							'width'  => 150,
+							'height' => 150,
+						),
+					),
+				),
+			);
+
+			$this->assertSame(
+				array( 'http://minio-loopback/2026/10/cloud-only-150x150.jpg', 150, 150, true ),
+				$this->filter()->filter_image_downsize( false, 77, 'thumbnail' )
+			);
+		}
+
+		/**
+		 * wp_get_attachment_image_src runs after image_downsize. It must not undo a
+		 * usable remote tuple supplied by an earlier integration by rewriting it to
+		 * KAZCODE's own delivery URL.
+		 */
+		public function test_image_src_preserves_a_pre_resolved_upstream_tuple_after_image_downsize(): void {
+			WpStubs::$post_meta[79] = array(
+				'_s3ms_status'            => AttachmentOffloader::STATUS_OFFLOADED,
+				'_wp_attached_file'       => '2026/10/cloud-only.jpg',
+				'_wp_attachment_metadata' => array(
+					'sizes' => array(
+						'thumbnail' => array( 'file' => 'cloud-only-150x150.jpg', 'width' => 150, 'height' => 150 ),
+					),
+				),
+			);
+			$upstream = array( 'http://example.test/uploads/2026/10/upstream-150x150.webp?provider=upstream', 150, 150, true );
+			$filter   = $this->filter();
+
+			$this->assertSame( $upstream, $filter->filter_image_downsize( $upstream, 79, 'thumbnail' ) );
+			$this->assertSame( $upstream, $filter->filter_image_src( $upstream, 79, 'thumbnail', false ) );
+		}
+
+		/**
+		 * KAZCODE must not substitute the original object for an unrecorded custom
+		 * size: WordPress can then continue its own local/icon fallback instead of
+		 * rendering the wrong media dimensions.
+		 */
+		public function test_image_downsize_leaves_an_unknown_image_variant_for_wordpress_fallback(): void {
+			WpStubs::$post_meta[78] = array(
+				'_s3ms_status'            => AttachmentOffloader::STATUS_OFFLOADED,
+				'_wp_attached_file'       => '2026/10/cloud-only.jpg',
+				'_wp_attachment_metadata' => array(
+					'width'  => 1800,
+					'height' => 1200,
+					'sizes'  => array(
+						'thumbnail' => array( 'file' => 'cloud-only-150x150.jpg', 'width' => 150, 'height' => 150 ),
+					),
+				),
+			);
+
+			$this->assertFalse( $this->filter()->filter_image_downsize( false, 78, 'third-party-custom-size' ) );
 		}
 
 		public function test_image_downsize_uses_real_intermediate_preview_for_non_image(): void {
@@ -428,6 +534,7 @@ namespace Kazcode\WpStorage\Tests {
 
 			$settings = $this->createMock( Settings::class );
 			$settings->method( 'is_serve_enabled' )->willReturn( true );
+			$settings->method( 'has_public_url_config' )->willReturn( true );
 			$settings->method( 'is_private_media' )->willReturn( true );
 			$settings->method( 'signed_url_ttl' )->willReturn( 900 );
 			$storage = $this->createMock( S3Storage::class );
@@ -459,6 +566,59 @@ namespace Kazcode\WpStorage\Tests {
 			);
 		}
 
+		public function test_private_direct_upload_original_is_presigned_from_its_exact_inventory_key(): void {
+			WpStubs::$post_meta[ 88 ] = array(
+				'_s3ms_status'      => 'offloaded',
+				'_wp_attached_file' => '2026/10/direct-original.png',
+			);
+			$settings = $this->createMock( Settings::class );
+			$settings->method( 'is_serve_enabled' )->willReturn( true );
+			$settings->method( 'has_public_url_config' )->willReturn( true );
+			$settings->method( 'is_private_media' )->willReturn( true );
+			$settings->method( 'signed_url_ttl' )->willReturn( 900 );
+			$legacy = $this->createMock( S3Storage::class );
+			$legacy->expects( $this->never() )->method( 'presigned_url_for_relative' );
+			$profile = new StorageProfile( 8, 'p8', 'Delivery', 'r2', 'bucket', 'auto', 'https://r2.example.test', true, 'uploads/', 'cdn', '', false, 'keys', 'ref', true, false, false, '', '' );
+			$locator = $this->createMock( ProfileObjectLocator::class );
+			$locator->expects( $this->once() )->method( 'locate' )->with( 88, '2026/10/direct-original.png' )->willReturn(
+				ProfileObjectLocation::found( array( 'id' => 801 ), $profile, 'uploads/direct-upload/session/attempt/direct-original.png', '2026/10/direct-original.png' )
+			);
+			$gateway = $this->createMock( ProfileStorageGateway::class );
+			$gateway->expects( $this->once() )->method( 'presigned_url_for_key' )
+				->with( 'uploads/direct-upload/session/attempt/direct-original.png', 900 )
+				->willReturn( 'https://private.example/direct-original?signature=test' );
+			$profile_ops = new ProfileAwareObjectOperations( $locator, static fn( StorageProfile $resolved ): ProfileStorageGateway => $gateway, $legacy, $settings );
+			$filter = $this->partial_filter(
+				88,
+				array( array( 'local_relative_path' => '2026/10/direct-original.png', 'object_key' => 'uploads/direct-upload/session/attempt/direct-original.png', 'storage_profile_id' => 8, 'remote_status' => ObjectRemoteStatus::PRESENT ) ),
+				$settings,
+				$legacy,
+				$profile_ops
+			);
+
+			$this->assertSame(
+				'https://private.example/direct-original?signature=test',
+				$filter->filter_attachment_url( 'http://example.test/uploads/2026/10/direct-original.png', 88 )
+			);
+		}
+
+		public function test_private_direct_upload_original_adapts_srcset_metadata_to_its_signed_object_path(): void {
+			WpStubs::$post_meta[ 89 ] = array(
+				'_s3ms_status'       => 'offloaded',
+				'_wp_attached_file'  => '2026/10/direct-original.png',
+				'_s3ms_original_key' => 'uploads/direct-upload/session/attempt/direct-original.png',
+			);
+			$settings = $this->createMock( Settings::class );
+			$settings->method( 'is_serve_enabled' )->willReturn( true );
+			$settings->method( 'is_private_media' )->willReturn( true );
+			$filter = new AttachmentUrlFilter( $settings, $this->createMock( PublicUrlResolver::class ), new S3KeyResolver( $settings ) );
+			$meta = array( 'file' => '2026/10/direct-original.png', 'width' => 1600, 'height' => 1000, 'sizes' => array( 'medium' => array( 'file' => 'direct-original-333x208.png', 'width' => 333, 'height' => 208 ) ) );
+
+			$result = $filter->filter_srcset_metadata( $meta, array( 1600, 1000 ), 'https://private.example/uploads/direct-upload/session/attempt/direct-original.png?signature=test', 89 );
+
+			$this->assertSame( 'uploads/direct-upload/session/attempt/direct-original.png', $result['file'] );
+		}
+
 		private function filter(): AttachmentUrlFilter {
 			$settings = $this->createMock( Settings::class );
 			$settings->method( 'is_serve_enabled' )->willReturn( true );
@@ -482,7 +642,7 @@ namespace Kazcode\WpStorage\Tests {
 		/**
 		 * @param list<array<string, mixed>> $rows
 		 */
-		private function partial_filter( int $attachment_id, array $rows, ?Settings $settings = null, ?S3Storage $storage = null ): AttachmentUrlFilter {
+		private function partial_filter( int $attachment_id, array $rows, ?Settings $settings = null, ?S3Storage $storage = null, ?ProfileAwareObjectOperations $profile_ops = null ): AttachmentUrlFilter {
 			$settings ??= $this->createMock( Settings::class );
 			$settings->method( 'is_serve_enabled' )->willReturn( true );
 			$settings->method( 'has_public_url_config' )->willReturn( true );
@@ -499,7 +659,8 @@ namespace Kazcode\WpStorage\Tests {
 				$this->createMock( PublicUrlResolver::class ),
 				new S3KeyResolver( $settings ),
 				$storage,
-				new ProfileDeliveryUrlResolver( $objects, $profiles )
+				new ProfileDeliveryUrlResolver( $objects, $profiles ),
+				$profile_ops
 			);
 		}
 	}

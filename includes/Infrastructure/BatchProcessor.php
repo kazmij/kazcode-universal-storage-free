@@ -314,6 +314,26 @@ final class BatchProcessor {
 
 		register_rest_route(
 			'kazcode-storage/v1',
+			'/imports/(?P<uuid>[^/]+)/remediation/start',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'rest_import_remediation_start' ),
+				'permission_callback' => array( $this, 'can_manage' ),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
+			'/imports/(?P<uuid>[^/]+)/process',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'rest_import_process' ),
+				'permission_callback' => array( $this, 'can_manage' ),
+			)
+		);
+
+		register_rest_route(
+			'kazcode-storage/v1',
 			'/imports/(?P<uuid>[^/]+)',
 			array(
 				'methods'             => 'GET',
@@ -438,6 +458,15 @@ final class BatchProcessor {
 		return $this->rest_import_start( $request, 'commit' );
 	}
 
+	/** @return \WP_REST_Response|\WP_Error */
+	public function rest_import_remediation_start( \WP_REST_Request $request ) {
+		$uuid = $this->request_uuid( $request );
+		if ( is_wp_error( $uuid ) ) {
+			return $uuid;
+		}
+		return $this->import_response( $this->competitor_imports()->start_remediation_upload( $uuid ) );
+	}
+
 	/**
 	 * @param \WP_REST_Request $request Request.
 	 * @return \WP_REST_Response|\WP_Error
@@ -448,6 +477,15 @@ final class BatchProcessor {
 			return $uuid;
 		}
 		return $this->import_response( $this->competitor_imports()->status( $uuid ) );
+	}
+
+	/** Process one bounded import page; status remains a read-only observation. */
+	public function rest_import_process( \WP_REST_Request $request ) {
+		$uuid = $this->request_uuid( $request );
+		if ( is_wp_error( $uuid ) ) {
+			return $uuid;
+		}
+		return $this->import_response( $this->competitor_imports()->process_next_page( $uuid, 50 ) );
 	}
 
 	/**

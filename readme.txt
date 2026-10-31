@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 1.3.0
+Stable tag: 1.3.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -175,9 +175,15 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 
 == Changelog ==
 
+= 1.3.1 =
+
+* Candidate only — not published. Exact-artifact AWS S3/R2 and release-matrix
+  qualification is required before this version can make user-facing capability
+  claims.
+
 = 1.3.0 =
 
-* Release candidate with PHP 8.1–8.5 compatibility coverage, strengthened release-artifact checks, and verified delivery/integrity regressions.
+* Added PHP 8.1–8.5 compatibility coverage, strengthened release-artifact checks, and verified delivery/integrity regressions.
 * Free continues to use the normal WordPress uploader; browser-to-bucket Direct Upload remains a Pro-only capability.
 
 = 1.2.5 =

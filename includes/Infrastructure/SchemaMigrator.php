@@ -17,7 +17,7 @@ defined( 'ABSPATH' ) || exit;
 final class SchemaMigrator {
 
 	public const OPTION_KEY = 's3ms_schema_version';
-	public const VERSION    = 12;
+	public const VERSION    = 14;
 
 	/**
 	 * Run pending schema upgrades.
@@ -71,6 +71,8 @@ final class SchemaMigrator {
 		if ( $current < 10 ) { $this->install_v10(); $current = 10; update_option( self::OPTION_KEY, $current, false ); }
 		if ( $current < 11 ) { $this->install_v11(); $current = 11; update_option( self::OPTION_KEY, $current, false ); }
 		if ( $current < 12 ) { $this->install_v12(); $current = 12; update_option( self::OPTION_KEY, $current, false ); }
+		if ( $current < 13 ) { $this->install_v13(); $current = 13; update_option( self::OPTION_KEY, $current, false ); }
+		if ( $current < 14 ) { $this->install_v14(); $current = 14; update_option( self::OPTION_KEY, $current, false ); }
 	}
 
 	/**
@@ -194,6 +196,52 @@ final class SchemaMigrator {
 
 		$objects = $wpdb->prefix . 's3ms_objects';
 		$this->add_index_if_missing( $objects, 'profile_relative_status', 'storage_profile_id, local_relative_path(191), remote_status' );
+	}
+
+	/** Persist exact per-descriptor reconciliation evidence for import runs. */
+	private function install_v13(): void {
+		global $wpdb;
+		if ( ! function_exists( 'dbDelta' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		}
+		$charset = $wpdb->get_charset_collate();
+		$table   = $wpdb->prefix . 's3ms_import_run_items';
+		$sql     = "CREATE TABLE {$table} (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			import_run_id bigint(20) unsigned NOT NULL,
+			attachment_id bigint(20) unsigned NOT NULL,
+			local_relative_path varchar(512) NOT NULL,
+			variant_type varchar(32) NOT NULL,
+			source_object_key varchar(1024) NOT NULL,
+			source_size_bytes bigint(20) unsigned DEFAULT NULL,
+			source_mime_type varchar(100) DEFAULT NULL,
+			canonical_object_key varchar(1024) NOT NULL DEFAULT '',
+			classification varchar(32) NOT NULL,
+			detail text DEFAULT NULL,
+			updated_at datetime NOT NULL,
+			PRIMARY KEY  (id),
+			UNIQUE KEY run_descriptor (import_run_id, attachment_id, local_relative_path(191), source_object_key(191)),
+			KEY run_classification_cursor (import_run_id, classification, id)
+		) {$charset};";
+		\dbDelta( $sql );
+		if ( ! $this->table_exists( $table ) ) {
+			throw new \RuntimeException( 'Unable to create s3ms_import_run_items.' );
+		}
+	}
+
+	/** Link remediation runs to their exact dry-run evidence and its row cursor. */
+	private function install_v14(): void {
+		global $wpdb;
+		$table = $wpdb->prefix . 's3ms_import_runs';
+		// A legacy schema marker can survive a partial restore that omitted the
+		// v3 import tables. Recreate that prerequisite before extending it.
+		if ( ! $this->table_exists( $table ) ) {
+			$this->install_v3();
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- versioned schema migration on a plugin-owned table.
+		if ( ! $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM {$table} LIKE %s", 'source_run_id' ) ) && false === $wpdb->query( "ALTER TABLE {$table} ADD source_run_id bigint(20) unsigned DEFAULT NULL AFTER source_fingerprint" ) ) throw new \RuntimeException( 'Unable to add import remediation source run.' );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- versioned schema migration on a plugin-owned table.
+		if ( ! $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM {$table} LIKE %s", 'after_item_id' ) ) && false === $wpdb->query( "ALTER TABLE {$table} ADD after_item_id bigint(20) unsigned NOT NULL DEFAULT 0 AFTER after_attachment_id" ) ) throw new \RuntimeException( 'Unable to add import remediation item cursor.' );
 	}
 
 	/**

@@ -85,7 +85,13 @@ function api(string $method, string $path, array $fields = array(), ?string $dow
 		throw new RuntimeException('Freemius API ' . $method . ' ' . $path . " failed HTTP {$code}" . ($error !== '' ? ': ' . $error : ''));
 	}
 	if ($download !== null) {
-		file_put_contents($download, (string) $data);
+		$directory = dirname($download);
+		if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
+			throw new RuntimeException('unable to create download directory: ' . $directory);
+		}
+		if (false === file_put_contents($download, (string) $data)) {
+			throw new RuntimeException('unable to write downloaded Freemius artifact: ' . $download);
+		}
 		return array('http' => $code, 'download' => $download);
 	}
 	$json = json_decode((string) $data, true);
@@ -98,6 +104,15 @@ function api(string $method, string $path, array $fields = array(), ?string $dow
 function find_tag_by_version(array $payload, string $version): ?array {
 	foreach (($payload['tags'] ?? array()) as $tag) {
 		if (is_array($tag) && (string) ($tag['version'] ?? '') === $version) {
+			return $tag;
+		}
+	}
+	return null;
+}
+
+function find_tag_by_id(array $payload, string $id): ?array {
+	foreach (($payload['tags'] ?? array()) as $tag) {
+		if (is_array($tag) && (string) ($tag['id'] ?? $tag['tag_id'] ?? '') === $id) {
 			return $tag;
 		}
 	}
@@ -166,14 +181,17 @@ try {
 				exit(2);
 			}
 			if ($tag_id !== '') {
-				$tag = api('GET', '/tags/' . rawurlencode($tag_id) . '.json');
-				echo json_encode($tag, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-				exit(0);
-			}
-			$payload = api('GET', '/tags.json?count=50');
-			$tag = find_tag_by_version($payload, $version);
-			if ($tag === null) {
-				exit(fail("Freemius deployment {$version} not found."));
+				$payload = api('GET', '/tags.json?count=50');
+				$tag = find_tag_by_id($payload, $tag_id);
+				if ($tag === null) {
+					exit(fail("Freemius deployment tag {$tag_id} not found."));
+				}
+			} else {
+				$payload = api('GET', '/tags.json?count=50');
+				$tag = find_tag_by_version($payload, $version);
+				if ($tag === null) {
+					exit(fail("Freemius deployment {$version} not found."));
+				}
 			}
 			echo json_encode($tag, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
 			exit(0);

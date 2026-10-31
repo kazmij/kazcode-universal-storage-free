@@ -310,14 +310,15 @@ final class PolicyReconciliationService {
 	public function policy_cleanup( int $attachment_id ): array {
 		$plugin = \Kazcode\WpStorage\Plugin::instance();
 		$files  = new AttachmentFileResolver( $plugin->key_resolver() );
-		$local  = $files->existing_local_files( $attachment_id );
+		$manifest = ( new ManifestBuilder( $files ) )->build( $attachment_id );
+		$local    = $files->existing_local_files_for_manifest_paths( $manifest->relative_paths() );
 		if ( $local === array() ) {
 			return array( 'deleted' => 0, 'message' => 'No local files.' );
 		}
 		return ( new CleanupLocalFiles( $this->settings, $plugin->storage() ) )->maybe_cleanup(
 			$attachment_id,
 			$local,
-			( new ManifestBuilder( $files ) )->build( $attachment_id )->items()
+			$manifest->items()
 		);
 	}
 

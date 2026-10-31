@@ -45,6 +45,7 @@ final class SchemaV2UpgradeTest extends TestCase {
 		$this->assertContains( 'ALTER TABLE wp_s3ms_objects ADD UNIQUE KEY profile_object_key_hash (storage_profile_id, object_key_hash)', $GLOBALS['s3ms_schema_queries'] );
 		$this->assertTrue( $this->table_exists( 's3ms_transfer_sessions' ) );
 		$this->assertTrue( $this->table_exists( 's3ms_import_runs' ) );
+		$this->assertTrue( $this->table_exists( 's3ms_import_run_items' ) );
 		$this->assertTrue( $this->table_exists( 's3ms_storage_reservations' ) );
 		$this->assertTrue( $this->table_exists( 's3ms_reservation_cleanup' ) );
 		$this->assertTrue( $this->table_exists( 's3ms_du_finalization_intents' ) );
@@ -69,6 +70,7 @@ final class SchemaV2UpgradeTest extends TestCase {
 				'wp_s3ms_reservation_cleanup',
 				'wp_s3ms_du_finalization_intents',
 				'wp_s3ms_direct_upload_migration_fences',
+				'wp_s3ms_import_run_items',
 			),
 			array_map(
 				static function ( string $sql ): string {
@@ -235,7 +237,8 @@ final class SchemaV2WpdbStub {
 		public bool $old_index = true;
 		public bool $hash_index = false;
 		public bool $transfer_table = false;
-		public bool $import_table = false;
+	public bool $import_table = false;
+	public bool $import_items_table = false;
 		public bool $skipped_column = false;
 		public bool $rejected_column = false;
 	public bool $skip_import_table = false;
@@ -301,6 +304,9 @@ final class SchemaV2WpdbStub {
 			}
 			if ( str_contains( $query, 'SHOW TABLES' ) && str_contains( $query, 's3ms_import_runs' ) ) {
 				return $this->import_table ? 'wp_s3ms_import_runs' : null;
+			}
+			if ( str_contains( $query, 'SHOW TABLES' ) && str_contains( $query, 's3ms_import_run_items' ) ) {
+				return $this->import_items_table ? 'wp_s3ms_import_run_items' : null;
 			}
 			if ( str_contains( $query, 'SHOW TABLES' ) && str_contains( $query, 's3ms_storage_reservations' ) ) {
 				return $this->reservation_table ? 'wp_s3ms_storage_reservations' : null;
@@ -391,6 +397,9 @@ final class SchemaV2WpdbStub {
 				if ( str_contains( $query, 'rejected bigint' ) ) {
 					$this->rejected_column = true;
 				}
+			}
+			if ( str_contains( $query, 'CREATE TABLE wp_s3ms_import_run_items' ) ) {
+				$this->import_items_table = true;
 			}
 			if ( str_contains( $query, 'CREATE TABLE wp_s3ms_storage_reservations' ) ) {
 				$this->reservation_table = true;

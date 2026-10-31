@@ -111,13 +111,17 @@ namespace Kazcode\WpStorage\Tests {
 			$this->assertSame( 2, $repo->total_count() );
 		}
 
-		public function test_v12_upgrade_adds_delivery_reverse_lookup_index_to_existing_objects_table(): void {
+		public function test_v11_upgrade_recovers_a_missing_legacy_import_table_and_adds_the_delivery_reverse_lookup_index(): void {
 			$this->create_public_v2_objects_table();
 			WpStubs::$options[ SchemaMigrator::OPTION_KEY ] = 11;
 
 			( new SchemaMigrator() )->maybe_upgrade();
 
 			$this->assertTrue( $this->index_exists( 'profile_relative_status' ) );
+			$this->assertTrue( $this->table_exists( 's3ms_import_runs' ) );
+			$this->assertTrue( $this->table_exists( 's3ms_import_run_items' ) );
+			$this->assertTrue( $this->column_exists_on_table( 's3ms_import_runs', 'source_run_id' ) );
+			$this->assertTrue( $this->column_exists_on_table( 's3ms_import_runs', 'after_item_id' ) );
 			$this->assertSame( SchemaMigrator::VERSION, (int) WpStubs::$options[ SchemaMigrator::OPTION_KEY ] );
 		}
 
@@ -482,6 +486,13 @@ namespace Kazcode\WpStorage\Tests {
 		private function column_exists( string $name ): bool {
 			$name = $this->db->real_escape_string( $name );
 			$res  = $this->db->query( "SHOW COLUMNS FROM `{$this->prefix}s3ms_objects` LIKE '{$name}'" );
+			return $res instanceof \mysqli_result && $res->num_rows > 0;
+		}
+
+		private function column_exists_on_table( string $suffix, string $column ): bool {
+			$table  = $this->db->real_escape_string( $this->prefix . $suffix );
+			$column = $this->db->real_escape_string( $column );
+			$res    = $this->db->query( "SHOW COLUMNS FROM `{$table}` LIKE '{$column}'" );
 			return $res instanceof \mysqli_result && $res->num_rows > 0;
 		}
 

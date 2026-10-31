@@ -169,6 +169,25 @@ final class PolicyReconciliationServiceTest extends TestCase {
 		$this->assertSame( array(), $this->cleanups );
 	}
 
+	public function test_policy_cleanup_includes_a_physical_hook_contributed_sidecar(): void {
+		$sidecar = self::ORIGINAL . '.webp';
+		wp_mkdir_p( dirname( WpStubs::$uploads_basedir . '/' . $sidecar ) );
+		file_put_contents( WpStubs::$uploads_basedir . '/' . $sidecar, 'webp-sidecar' );
+		WpStubs::set_meta( 42, '_wp_attached_file', self::ORIGINAL );
+
+		add_filter(
+			'kazus_manifest_files',
+			static function ( array $items ) use ( $sidecar ): array {
+				$items[] = array( 'relative' => $sidecar, 'variant_type' => 'sidecar' );
+				return $items;
+			}
+		);
+
+		$result = $this->service( LocalStoragePolicy::KEEP_ALL, array() )->policy_cleanup( 42 );
+
+		$this->assertSame( 'Local retention policy keeps all files.', $result['message'] );
+	}
+
 	/**
 	 * @param list<array<string,mixed>> $rows
 	 */

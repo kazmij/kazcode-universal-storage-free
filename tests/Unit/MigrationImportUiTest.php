@@ -96,6 +96,8 @@ namespace Kazcode\WpStorage\Tests {
 			$this->assertStringContainsString( 'id="s3ms-import-profile"', $html );
 			$this->assertStringContainsString( 'data-s3ms-import-action="analyze"', $html );
 			$this->assertMatchesRegularExpression( '/data-s3ms-import-action="commit"[^>]*disabled/', $html );
+			$this->assertMatchesRegularExpression( '/data-s3ms-import-action="remediate"[^>]*disabled/', $html );
+			$this->assertStringContainsString( 'Upload eligible local files', $html );
 			foreach ( array( 'Attachments scanned', 'Objects checked', 'Verified / adopted', 'Confirmed missing', 'Transient errors', 'Conflicts', 'Skipped', 'Updated' ) as $label ) {
 				$this->assertStringContainsString( $label, $html );
 			}

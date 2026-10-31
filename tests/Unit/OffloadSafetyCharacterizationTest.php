@@ -114,6 +114,61 @@ final class OffloadSafetyCharacterizationTest extends TestCase {
 		$this->assertSame(array(), WpStubs::$deleted_files);
 	}
 
+	public function test_legacy_path_uploads_a_hook_contributed_sidecar(): void {
+		$original = '2026/08/photo.jpg';
+		$sidecar  = '2026/08/photo.jpg.webp';
+		$files    = array(
+			$original => $this->touch_file( $original ),
+			$sidecar  => $this->touch_file( $sidecar ),
+		);
+
+		$settings = $this->createMock( Settings::class );
+		$settings->method( 'local_storage_policy' )->willReturn( \Kazcode\WpStorage\Domain\LocalStoragePolicy::KEEP_ALL );
+
+		$keys     = new S3KeyResolver( $this->settings_map( array( 'object_prefix' => '' ) ) );
+		$uploaded = array();
+		$storage  = $this->createMock( S3Storage::class );
+		$storage->method( 'keys' )->willReturn( $keys );
+		$storage->method( 'upload_file' )->willReturnCallback(
+			static function ( string $absolute, string $relative ) use ( &$uploaded ): string {
+				unset( $absolute );
+				$uploaded[] = $relative;
+				return $relative;
+			}
+		);
+		$storage->method( 'head_relative' )->willReturn( array( 'exists' => true, 'content_length' => 1 ) );
+
+		$resolver = $this->getMockBuilder( AttachmentFileResolver::class )
+			->setConstructorArgs( array( $keys ) )
+			->onlyMethods( array( 'existing_local_files', 'existing_local_files_for_manifest_paths', 'relative_paths' ) )
+			->getMock();
+		$resolver->method( 'existing_local_files' )->willReturn( array( $original => $files[ $original ] ) );
+		$resolver->method( 'relative_paths' )->willReturn( array( $original ) );
+		$resolver->method( 'existing_local_files_for_manifest_paths' )->willReturnCallback(
+			static function ( array $paths ) use ( $files ): array {
+				return array_intersect_key( $files, array_flip( $paths ) );
+			}
+		);
+
+		add_filter(
+			'kazus_manifest_files',
+			static function ( array $items ) use ( $sidecar ): array {
+				$items[] = array( 'relative' => $sidecar, 'variant_type' => 'sidecar' );
+				return $items;
+			}
+		);
+
+		$offloader = new AttachmentOffloader( $settings, $storage );
+		$this->inject( $offloader, 'files', $resolver );
+		$this->inject( $offloader, 'lock', $this->always_lock() );
+		WpStubs::set_meta( 71, '_wp_attached_file', $original );
+
+		$result = $offloader->offload( 71, false );
+
+		$this->assertTrue( $result['success'] );
+		$this->assertSame( array( $original, $sidecar ), $uploaded );
+	}
+
 	public function test_verify_before_delete_true_skips_local_delete_when_head_fails(): void {
 		$files = array(
 			'2026/08/photo.jpg' => $this->touch_file('2026/08/photo.jpg'),

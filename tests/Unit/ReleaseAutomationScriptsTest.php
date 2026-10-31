@@ -301,6 +301,25 @@ final class ReleaseAutomationScriptsTest extends TestCase {
 		self::assertStringNotContainsString("printf '%s\\n' \"\${MANIFEST}\" | grep", $verifier);
 	}
 
+	public function test_stable_pro_readme_does_not_ship_candidate_only_copy(): void {
+		$pro_readme = dirname( $this->root ) . '/kazcode-universal-storage-pro/readme.txt';
+		$contents   = file_get_contents( $pro_readme );
+
+		self::assertIsString( $contents );
+		self::assertStringNotContainsString( 'Candidate only — not published.', $contents );
+	}
+
+	public function test_unverified_direct_upload_is_not_described_as_a_shipping_capability(): void {
+		$free_readme = file_get_contents( $this->root . '/readme.txt' );
+		$pro_readme  = file_get_contents( dirname( $this->root ) . '/kazcode-universal-storage-pro/readme.txt' );
+
+		self::assertIsString( $free_readme );
+		self::assertIsString( $pro_readme );
+		self::assertStringNotContainsString( 'JPEG, PNG, WebP, PDF, ZIP, MP3, MP4, and DOCX', $free_readme );
+		self::assertStringNotContainsString( 'browser-to-storage Direct Upload', $free_readme );
+		self::assertStringNotContainsString( 'Improved Direct Upload delivery', $pro_readme );
+	}
+
 	public function test_ci_package_audit_does_not_hide_matches_behind_pipefail_broken_pipes(): void {
 		$ci = dirname( $this->root ) . '/tools/ci/release-build.sh';
 		if ( ! is_file( $ci ) ) {

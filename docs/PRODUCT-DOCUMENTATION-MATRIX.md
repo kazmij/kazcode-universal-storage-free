@@ -1,4 +1,4 @@
-# Universal Storage 1.3.1 / 1.3.1 feature matrix
+# Universal Storage 1.3.2 / 1.3.2 feature matrix
 
 ## Free
 
@@ -8,6 +8,4 @@
 ## Pro
 
 - **Advanced storage operations** — not_verified. Candidate behavior awaiting exact-artifact release evidence.
-- **Direct Upload images** — not_verified. Candidate behavior awaiting exact-artifact browser E2E on AWS S3 and Cloudflare R2.
-- **Direct Upload non-image files** — not_verified. Candidate behavior awaiting exact-artifact browser E2E on AWS S3 and Cloudflare R2.
-- **Direct Upload from the Media Library entry point** — not_verified. The acceptance-preview/UI path is not a release claim for a production Media Library replacement flow; use the normal WordPress uploader unless a future record provides exact release evidence.
+- **Direct Upload** — not_verified. Opt-in Pro behavior awaiting fresh exact-artifact browser and provider qualification; no provider, format, or Media Library replacement claim is advertised by this candidate.

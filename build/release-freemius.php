@@ -180,15 +180,25 @@ try {
 				usage();
 				exit(2);
 			}
+			// The collection endpoint currently omits pending deployments. Ask for
+			// the latest deployment across all release modes first so a release
+			// gate can verify its pending candidate before promoting it.
+			$latest = api('GET', '/tags/latest.json?type=all');
 			if ($tag_id !== '') {
-				$payload = api('GET', '/tags.json?count=50');
-				$tag = find_tag_by_id($payload, $tag_id);
+				$tag = find_tag_by_id(array('tags' => array($latest)), $tag_id);
+				if ($tag === null) {
+					$payload = api('GET', '/tags.json?count=50');
+					$tag = find_tag_by_id($payload, $tag_id);
+				}
 				if ($tag === null) {
 					exit(fail("Freemius deployment tag {$tag_id} not found."));
 				}
 			} else {
-				$payload = api('GET', '/tags.json?count=50');
-				$tag = find_tag_by_version($payload, $version);
+				$tag = find_tag_by_version(array('tags' => array($latest)), $version);
+				if ($tag === null) {
+					$payload = api('GET', '/tags.json?count=50');
+					$tag = find_tag_by_version($payload, $version);
+				}
 				if ($tag === null) {
 					exit(fail("Freemius deployment {$version} not found."));
 				}

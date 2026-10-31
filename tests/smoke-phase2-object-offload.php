@@ -141,7 +141,7 @@ require_once ABSPATH . 'wp-admin/includes/image.php';
 $meta = wp_generate_attachment_metadata( $attachment_id, $abs );
 wp_update_attachment_metadata( $attachment_id, $meta );
 
-$result = $plugin->offloader()->offload( $attachment_id, false, $meta );
+$result = $plugin->offloader()->offload( $attachment_id, true );
 if ( empty( $result['success'] ) ) {
 	$fail( 'Offload failed: ' . ( $result['message'] ?? 'unknown' ) );
 }
@@ -167,9 +167,77 @@ foreach ( $rows as $row ) {
 	}
 }
 
+$bindings_before_rebuild = array();
+$remote_before_rebuild   = array();
+foreach ( $rows as $row ) {
+	$key = (string) ( $row['object_key'] ?? '' );
+	$bindings_before_rebuild[] = (string) ( $row['local_relative_path'] ?? '' ) . "\0" . $key;
+	$head = $storage->client()->headObject(
+		array(
+			'Bucket' => $minio['bucket'],
+			'Key'    => $key,
+		)
+	);
+	$last_modified = $head['LastModified'] ?? null;
+	$remote_before_rebuild[ $key ] = array(
+		'etag'          => (string) ( $head['ETag'] ?? '' ),
+		'content_length' => (int) ( $head['ContentLength'] ?? 0 ),
+		'last_modified'  => $last_modified instanceof DateTimeInterface ? $last_modified->format( DATE_ATOM ) : '',
+	);
+}
+sort( $bindings_before_rebuild );
+ksort( $remote_before_rebuild );
+
 $ok( sprintf( 'Offloaded attachment %d with %d object row(s)', $attachment_id, count( $rows ) ) );
 
-// Keep locals present so restore is a control-plane check + inventory clear.
+// A safe cleanup is part of the real lifecycle: only after each remote HEAD
+// above succeeded may the original disappear from the custom uploads root.
+if ( is_readable( $abs ) ) {
+	$fail( 'Expected guarded cleanup to remove the local original after verified offload.' );
+}
+$ok( 'Guarded cleanup removed local original only after remote verification' );
+
+// Simulate a lost local inventory table while the exact remote objects remain.
+// Rebuild must discover only those exact keys; it must never upload in this path.
+$deleted_rows = ( new ObjectRepository() )->delete_by_attachment( $attachment_id );
+if ( $deleted_rows !== count( $rows ) ) {
+	$fail( sprintf( 'Expected to remove %d inventory row(s), removed %d.', count( $rows ), $deleted_rows ) );
+}
+$rebuild = $plugin->rebuild_inventory()->rebuild_attachment( $attachment_id, null, false );
+if ( empty( $rebuild['success'] ) || ( $rebuild['outcome'] ?? '' ) !== 'complete' ) {
+	$fail( 'Inventory rebuild failed: ' . wp_json_encode( $rebuild ) );
+}
+$rebuilt_rows = ( new ObjectRepository() )->find_by_attachment( $attachment_id );
+$bindings_after_rebuild = array();
+$remote_after_rebuild   = array();
+foreach ( $rebuilt_rows as $row ) {
+	$key = (string) ( $row['object_key'] ?? '' );
+	$bindings_after_rebuild[] = (string) ( $row['local_relative_path'] ?? '' ) . "\0" . $key;
+	$head = $storage->client()->headObject(
+		array(
+			'Bucket' => $minio['bucket'],
+			'Key'    => $key,
+		)
+	);
+	$last_modified = $head['LastModified'] ?? null;
+	$remote_after_rebuild[ $key ] = array(
+		'etag'          => (string) ( $head['ETag'] ?? '' ),
+		'content_length' => (int) ( $head['ContentLength'] ?? 0 ),
+		'last_modified'  => $last_modified instanceof DateTimeInterface ? $last_modified->format( DATE_ATOM ) : '',
+	);
+}
+sort( $bindings_after_rebuild );
+ksort( $remote_after_rebuild );
+if ( $bindings_after_rebuild !== $bindings_before_rebuild ) {
+	$fail( 'Rebuild changed the exact local-relative/object-key inventory bindings.' );
+}
+if ( $remote_after_rebuild !== $remote_before_rebuild ) {
+	$fail( 'Rebuild altered a remote object instead of observing it.' );
+}
+$ok( 'Rebuild inventory adopted exact remote objects without altering remote bytes' );
+
+// The original is cloud-only at this point, so this is a real download and
+// inventory-clear path rather than merely a control-plane restore.
 $restore_result = $plugin->restorer()->restore( $attachment_id );
 if ( empty( $restore_result['success'] ) ) {
 	$fail( 'Restore failed: ' . ( $restore_result['message'] ?? 'unknown' ) );

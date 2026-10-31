@@ -4,7 +4,7 @@ Tags: s3, cloudflare r2, media offload, amazon s3, object storage
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 1.3.1
+Stable tag: 1.3.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -63,14 +63,11 @@ Already using WP Offload Media, Advanced Media Offloader, or Media Cloud? KAZCOD
 
 Pro is a separate add-on for multiple Storage Profiles and provider-to-provider migration, such as Amazon S3 to Cloudflare R2. Pro keeps the source authoritative until the destination is transferred, verified, and cut over. Optional source deletion is available after verification.
 
-= Direct Upload for supported file workflows =
+= Optional Pro workflows =
 
-Pro can optionally send JPEG, PNG, WebP, PDF, ZIP, MP3, MP4, and DOCX uploads from an administrator's
-browser directly to the selected S3-compatible storage profile. WordPress still
-creates the native attachment metadata and generated image sizes, while KAZCODE
-verifies and inventories every resulting object before the Media Library item is
-ready. Direct Upload is off by default and requires the site's administrator to
-configure the storage provider's browser CORS policy before enabling it.
+Optional Pro workflows are disabled by default and must be qualified for the
+site's chosen storage provider before use. Consult the current documentation
+before enabling them; the standard WordPress uploader remains available.
 
 [View Pro features and pricing](https://kazcode.net/universal-storage/#pricing)
 
@@ -121,7 +118,7 @@ Free includes one storage profile, S3-compatible offload, existing media process
 
 = What does Pro add? =
 
-Pro adds multiple Storage Profiles, provider migration, verified cutover, optional source deletion, advanced health/orphan tools, network/agency functions, and optional browser-to-storage Direct Upload for JPEG, PNG, WebP, PDF, ZIP, MP3, MP4, and DOCX files. [View Pro features and pricing](https://kazcode.net/universal-storage/#pricing)
+Pro adds multiple Storage Profiles, provider migration, verified cutover, optional source deletion, advanced health/orphan tools, network/agency functions, and optional provider-qualified workflows. [View Pro features and pricing](https://kazcode.net/universal-storage/#pricing)
 
 = Can I migrate from Amazon S3 to Cloudflare R2? =
 
@@ -175,11 +172,14 @@ MinIO and other S3-compatible endpoints - the plugin talks directly to the confi
 
 == Changelog ==
 
-= 1.3.1 =
+= 1.3.2 =
 
-* Candidate only — not published. Exact-artifact AWS S3/R2 and release-matrix
-  qualification is required before this version can make user-facing capability
-  claims.
+* Improved importer reconciliation safety, including durable per-object review
+  state and guarded remediation for confirmed missing or size-conflict records.
+* Improved compatibility with malformed external attachment IDs and physical
+  WebP/AVIF sidecar files supplied by image-optimization integrations.
+* Updated release documentation and package checks for the current PHP 8.1+
+  Free and Pro release pair.
 
 = 1.3.0 =
 
